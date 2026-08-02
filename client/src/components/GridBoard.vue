@@ -155,9 +155,24 @@ interface MouseLike {
   clientY: number
 }
 let mouseDown = false
+
+// H5：全局 mouseup 监听，防止在 board 外松开丢失提交（修复已知技术债）
+function onWindowMouseUp() {
+  if (mouseDown) {
+    handleEnd()
+    mouseDown = false
+  }
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('mouseup', onWindowMouseUp)
+  }
+}
+
 function onMouseDown(e: MouseLike) {
   mouseDown = true
   handleStart(e.clientX, e.clientY)
+  if (typeof window !== 'undefined') {
+    window.addEventListener('mouseup', onWindowMouseUp)
+  }
 }
 function onMouseMove(e: MouseLike) {
   if (mouseDown) handleMove(e.clientX, e.clientY)
@@ -166,6 +181,9 @@ function onMouseUp() {
   if (mouseDown) {
     handleEnd()
     mouseDown = false
+  }
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('mouseup', onWindowMouseUp)
   }
 }
 

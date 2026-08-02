@@ -25,7 +25,8 @@ export const useGameStore = defineStore('game', () => {
   const loading = ref(false)
   const errorMsg = ref<string | null>(null)
   const combo = ref(0)
-  const comboMultiplier = ref(1)
+  const comboBonus = ref(0)
+  const comboScore = ref(0)
   const maxCombo = ref(0)
   const potentialCount = ref(0)
 
@@ -55,7 +56,8 @@ export const useGameStore = defineStore('game', () => {
     lastFoundRarity.value = null
     errorMsg.value = null
     combo.value = 0
-    comboMultiplier.value = 1
+    comboBonus.value = 0
+    comboScore.value = 0
     maxCombo.value = 0
     potentialCount.value = 0
     loading.value = true
@@ -105,7 +107,7 @@ export const useGameStore = defineStore('game', () => {
     selectedCells.value = []
 
     if (cells.length < 2) {
-      lastFeedback.value = 'fail'
+      // 单字：静默忽略（未完成的无效操作，不触发失败判定与背景闪烁）
       return
     }
 
@@ -120,7 +122,7 @@ export const useGameStore = defineStore('game', () => {
         })
         score.value = res.totalScore ?? score.value + res.score
         combo.value = res.combo ?? 0
-        comboMultiplier.value = res.comboMultiplier ?? 1
+        comboBonus.value = res.comboBonus ?? 0
         maxCombo.value = Math.max(maxCombo.value, combo.value)
         lastFeedback.value = 'success'
         lastFloatScore.value = res.score
@@ -143,6 +145,7 @@ export const useGameStore = defineStore('game', () => {
     try {
       const res = await endGameApi(matchSessionId.value)
       score.value = res.score
+      comboScore.value = res.comboScore
       maxCombo.value = res.maxCombo
       potentialCount.value = res.potentialCount
       foundWords.value = res.foundWords.map((f) => ({
@@ -170,7 +173,8 @@ export const useGameStore = defineStore('game', () => {
     lastFoundRarity.value = null
     errorMsg.value = null
     combo.value = 0
-    comboMultiplier.value = 1
+    comboBonus.value = 0
+    comboScore.value = 0
     maxCombo.value = 0
     potentialCount.value = 0
   }
@@ -195,7 +199,8 @@ export const useGameStore = defineStore('game', () => {
     loading,
     errorMsg,
     combo,
-    comboMultiplier,
+    comboBonus,
+    comboScore,
     maxCombo,
     potentialCount,
     currentWord,

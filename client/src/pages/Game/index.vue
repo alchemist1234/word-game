@@ -141,7 +141,7 @@ watch(
 
     <view class="combo-bar" :class="{ 'combo-idle': store.combo === 0 }">
       <text v-if="store.combo > 0" class="combo-text">
-        连击 ×{{ store.combo }}<text class="combo-mult">（×{{ store.comboMultiplier.toFixed(1) }}）</text>
+        连击 ×{{ store.combo }}<text class="combo-mult">（本次 +{{ store.comboBonus }}分）</text>
       </text>
       <view class="combo-track">
         <view class="combo-fill" :style="{ width: comboBarWidth }" />
@@ -167,7 +167,7 @@ watch(
     <view class="float-score" :class="[floatColorClass, { 'float-show': floatVisible }]">
       <template v-if="store.lastFloatScore !== null">
         <text>+{{ store.lastFloatScore }}</text>
-        <text v-if="store.comboMultiplier > 1" class="float-mult">×{{ store.comboMultiplier.toFixed(1) }}</text>
+        <text v-if="store.comboBonus > 0" class="float-mult">+{{ store.comboBonus }}</text>
       </template>
     </view>
   </view>

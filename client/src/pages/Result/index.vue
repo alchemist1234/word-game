@@ -44,6 +44,10 @@ function goHome() {
       <text class="stat">最高连击 ×{{ store.maxCombo }}</text>
     </view>
 
+    <view v-if="store.comboScore > 0" class="combo-score">
+      <text>连击得分 +{{ store.comboScore }}</text>
+    </view>
+
     <view v-if="coveragePercent !== null" class="coverage">
       <text class="coverage-text">
         本局可形成 {{ store.potentialCount }} 个词，你找到了 {{ store.foundWords.length }} 个（{{ coveragePercent }}%）
@@ -114,6 +118,12 @@ function goHome() {
 .stat {
   font-size: 26rpx;
   color: #6a5a4a;
+}
+.combo-score {
+  font-size: 26rpx;
+  color: #d97a1e;
+  font-weight: bold;
+  margin-bottom: 16rpx;
 }
 .coverage {
   width: 100%;

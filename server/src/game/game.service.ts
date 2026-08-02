@@ -5,7 +5,7 @@ import Redis from 'ioredis'
 import { v4 as uuidv4 } from 'uuid'
 import { GridPoolService } from '../grid-pool/grid-pool.service'
 import { DictionaryService } from '../dictionary/dictionary.service'
-import { validatePath, calcScore, calcComboMultiplier } from './check'
+import { validatePath, calcScore, calcComboBonus } from './check'
 import type { CellPos, Rarity } from '../grid-gen/types'
 import { REDIS_TOKEN } from '../common/redis.module'
 
@@ -43,6 +43,7 @@ export class GameService {
       targetWords: JSON.stringify(gridEntity.targetWords),
       potentialCount: gridEntity.potentialCount.toString(),
       score: '0',
+      comboScore: '0',
       combo: '0',
       maxCombo: '0',
       lastWordAt: '',
@@ -69,7 +70,7 @@ export class GameService {
     rarity?: string
     totalScore?: number
     combo?: number
-    comboMultiplier?: number
+    comboBonus?: number
     comboRemainingMs?: number
   }> {
     const session = await this.redis.hgetall(`match_session:${matchSessionId}`)
@@ -110,23 +111,22 @@ export class GameService {
     if (lastWordAt > 0 && now - lastWordAt <= COMBO_WINDOW_MS) {
       combo = Math.min(parseInt(session.combo || '0', 10) + 1, MAX_COMBO)
     }
-    const comboMultiplier = calcComboMultiplier(combo)
+    const comboBonus = calcComboBonus(combo)
     const newMaxCombo = Math.max(parseInt(session.maxCombo || '0', 10), combo)
 
-    // 6. 计分
-    const score = calcScore(
-      dictEntry.length,
-      dictEntry.rarity as Rarity,
-      comboMultiplier,
-    )
+    // 6. 计分：基础分×稀有度 + 连击固定加分（替代倍率，避免顺序影响总分）
+    const score =
+      calcScore(dictEntry.length, dictEntry.rarity as Rarity) + comboBonus
 
     // 7. 更新会话
     await this.redis.sadd(foundKey, word)
     await this.redis.expire(foundKey, SESSION_TTL)
     const currentScore = parseInt(session.score || '0', 10)
+    const currentComboScore = parseInt(session.comboScore || '0', 10)
     const newScore = currentScore + score
     await this.redis.hset(`match_session:${matchSessionId}`, {
       score: newScore.toString(),
+      comboScore: (currentComboScore + comboBonus).toString(),
       combo: combo.toString(),
       maxCombo: newMaxCombo.toString(),
       lastWordAt: now.toString(),
@@ -138,7 +138,7 @@ export class GameService {
       rarity: dictEntry.rarity,
       totalScore: newScore,
       combo,
-      comboMultiplier,
+      comboBonus,
       comboRemainingMs: COMBO_WINDOW_MS,
     }
   }
@@ -146,6 +146,7 @@ export class GameService {
   /** 结算 */
   async endGame(matchSessionId: string): Promise<{
     score: number
+    comboScore: number
     maxCombo: number
     potentialCount: number
     foundWords: Array<{ word: string; score: number; rarity: string }>
@@ -172,6 +173,7 @@ export class GameService {
     foundWords.sort((a, b) => b.score - a.score)
     return {
       score: parseInt(session.score || '0', 10),
+      comboScore: parseInt(session.comboScore || '0', 10),
       maxCombo: parseInt(session.maxCombo || '0', 10),
       potentialCount: parseInt(session.potentialCount || '0', 10),
       foundWords,
