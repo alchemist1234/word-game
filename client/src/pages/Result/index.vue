@@ -21,22 +21,42 @@ const coveragePercent = computed(() => {
 })
 
 function playAgain() {
-  store.startGame()
-  uni.redirectTo({ url: '/pages/Game/index' })
+  if (store.levelMode && store.levelId) {
+    store.startLevel(store.levelId)
+    uni.redirectTo({ url: `/pages/Game/index?levelId=${store.levelId}` })
+  } else {
+    store.startGame()
+    uni.redirectTo({ url: '/pages/Game/index' })
+  }
+}
+
+function goNextLevel() {
+  if (store.nextLevelId) {
+    store.startLevel(store.nextLevelId)
+    uni.redirectTo({ url: `/pages/Game/index?levelId=${store.nextLevelId}` })
+  }
 }
 
 function goHome() {
   store.restart()
-  uni.reLaunch({ url: '/pages/Home/index' })
+  uni.reLaunch({ url: '/pages/Chapters/index' })
 }
 </script>
 
 <template>
   <view class="result">
-    <text class="title">本局结束</text>
+    <text class="title">{{ store.levelMode ? store.levelTitle : '本局结束' }}</text>
+    <view v-if="store.levelMode" class="stars-display">
+      <text :class="store.lastStars >= 1 ? 'star-active' : 'star-inactive'">★</text>
+      <text :class="store.lastStars >= 2 ? 'star-active' : 'star-inactive'">★</text>
+      <text :class="store.lastStars >= 3 ? 'star-active' : 'star-inactive'">★</text>
+    </view>
     <view class="score-wrap">
       <text class="total-score">{{ store.score }}</text>
       <text class="score-unit">分</text>
+    </view>
+    <view v-if="store.perfect" class="perfect-badge">
+      <text>完美通关 +{{ store.perfectBonus }}</text>
     </view>
     <view class="stats">
       <text class="stat">找到 {{ store.foundWords.length }} 个词</text>
@@ -73,9 +93,24 @@ function goHome() {
       </view>
     </scroll-view>
 
+    <view v-if="store.unfoundWords.length > 0" class="unfound-section">
+      <text class="unfound-title">本局未找到的词（{{ store.unfoundWords.length }} 个）</text>
+      <scroll-view scroll-y class="unfound-list">
+        <view class="unfound-tags">
+          <text
+            v-for="uw in store.unfoundWords"
+            :key="uw.word"
+            class="unfound-tag"
+            :class="'tag-' + uw.rarity"
+          >{{ uw.word }}</text>
+        </view>
+      </scroll-view>
+    </view>
+
     <view class="actions">
+      <button v-if="store.canNext && store.nextLevelId" class="btn-next" @tap="goNextLevel">下一关</button>
       <button class="btn-primary" @tap="playAgain">再来一局</button>
-      <button class="btn-secondary" @tap="goHome">返回首页</button>
+      <button class="btn-secondary" @tap="goHome">返回章节</button>
     </view>
   </view>
 </template>
@@ -93,6 +128,21 @@ function goHome() {
   font-size: 40rpx;
   color: #8a7a6a;
 }
+.stars-display {
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+  gap: 16rpx;
+  margin: 16rpx 0;
+}
+.star-active {
+  font-size: 72rpx;
+  color: #d4a017;
+}
+.star-inactive {
+  font-size: 72rpx;
+  color: #d4c8b8;
+}
 .score-wrap {
   display: flex;
   flex-direction: row;
@@ -108,6 +158,17 @@ function goHome() {
   font-size: 40rpx;
   color: #8a7a6a;
   margin-left: 12rpx;
+}
+.perfect-badge {
+  padding: 12rpx 32rpx;
+  background: #d4a017;
+  border-radius: 40rpx;
+  margin-bottom: 16rpx;
+}
+.perfect-badge text {
+  font-size: 30rpx;
+  font-weight: bold;
+  color: #ffffff;
 }
 .stats {
   display: flex;
@@ -197,6 +258,49 @@ function goHome() {
   padding: 80rpx 0;
   color: #b0a090;
 }
+.unfound-section {
+  width: 100%;
+  margin-top: 16rpx;
+}
+.unfound-title {
+  font-size: 24rpx;
+  color: #b0a090;
+  display: block;
+  margin-bottom: 8rpx;
+}
+.unfound-list {
+  max-height: 180rpx;
+}
+.unfound-tags {
+  display: flex;
+  flex-wrap: wrap;
+}
+.unfound-tag {
+  font-size: 22rpx;
+  line-height: 1.2;
+  padding: 4rpx 12rpx;
+  margin: 4rpx;
+  border: 1rpx solid;
+  border-radius: 8rpx;
+  background: #f0ece4;
+  opacity: 0.75; /* 未找到：淡化显示 */
+}
+.tag-idiom {
+  color: #b8860b;
+  border-color: #d4a017;
+}
+.tag-rare {
+  color: #8e44ad;
+  border-color: #8e44ad;
+}
+.tag-normal {
+  color: #4a90d9;
+  border-color: #4a90d9;
+}
+.tag-common {
+  color: #6a5a4a;
+  border-color: #b0a090;
+}
 .actions {
   display: flex;
   flex-direction: row;
@@ -221,7 +325,16 @@ function goHome() {
   border: 2rpx solid #4a90d9;
 }
 .btn-primary::after,
-.btn-secondary::after {
+.btn-secondary::after,
+.btn-next::after {
+  border: none;
+}
+.btn-next {
+  flex: 1;
+  background: #d4a017;
+  color: #ffffff;
+  font-size: 32rpx;
+  border-radius: 48rpx;
   border: none;
 }
 </style>

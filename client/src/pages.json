@@ -1,8 +1,12 @@
 {
   "pages": [
     {
-      "path": "pages/Home/index",
-      "style": { "navigationBarTitleText": "字海寻词" }
+      "path": "pages/Login/index",
+      "style": { "navigationBarTitleText": "登录" }
+    },
+    {
+      "path": "pages/Chapters/index",
+      "style": { "navigationBarTitleText": "章节地图" }
     },
     {
       "path": "pages/Game/index",
@@ -11,6 +15,10 @@
     {
       "path": "pages/Result/index",
       "style": { "navigationBarTitleText": "结算" }
+    },
+    {
+      "path": "pages/Pokedex/index",
+      "style": { "navigationBarTitleText": "词库图鉴" }
     }
   ],
   "globalStyle": {

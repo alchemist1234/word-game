@@ -1,13 +1,15 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import type { CellPos, FoundWord, GamePhase, Rarity } from '../core/types'
-import { fetchGrid, submitWord, endGame as endGameApi } from '../api'
+import {
+  fetchGrid,
+  submitWord,
+  endGame as endGameApi,
+  startLevel as startLevelApi,
+  submitLevel as submitLevelApi,
+} from '../api'
 
-/**
- * 单局状态机（迭代2改造：调后端 API，移除本地 gridGen/wordCheck/score）
- * 对齐迭代2详细设计 §8.3
- */
-const GAME_DURATION = 90 // 1 分 30 秒（兜底默认，实际以后端返回 duration 为准）
+const GAME_DURATION = 90
 
 let timerId: ReturnType<typeof setInterval> | null = null
 
@@ -29,12 +31,21 @@ export const useGameStore = defineStore('game', () => {
   const comboScore = ref(0)
   const maxCombo = ref(0)
   const potentialCount = ref(0)
+  // 闯关模式
+  const levelMode = ref(false)
+  const levelId = ref<string>('')
+  const levelTitle = ref<string>('')
+  const objective = ref<{ type: string; target?: number; score?: number; char?: string } | null>(null)
+  const lastStars = ref(0)
+  const canNext = ref(false)
+  const nextLevelId = ref<string | null>(null)
+  const perfect = ref(false)
+  const perfectBonus = ref(0)
+  const unfoundWords = ref<Array<{ word: string; rarity: string }>>([])
 
   const currentWord = computed(() => {
     if (grid.value.length === 0) return ''
-    return selectedCells.value
-      .map((c) => grid.value[c.row][c.col])
-      .join('')
+    return selectedCells.value.map((c) => grid.value[c.row][c.col]).join('')
   })
 
   function clearTimer() {
@@ -44,9 +55,7 @@ export const useGameStore = defineStore('game', () => {
     }
   }
 
-  /** 开始新一局：从后端拉网格、重置状态、启动倒计时 */
-  async function startGame() {
-    clearTimer()
+  function resetState() {
     selectedCells.value = []
     foundWords.value = []
     score.value = 0
@@ -60,6 +69,19 @@ export const useGameStore = defineStore('game', () => {
     comboScore.value = 0
     maxCombo.value = 0
     potentialCount.value = 0
+    lastStars.value = 0
+    perfect.value = false
+    perfectBonus.value = 0
+    unfoundWords.value = []
+  }
+
+  /** 自由模式：开始新一局 */
+  async function startGame() {
+    clearTimer()
+    resetState()
+    levelMode.value = false
+    levelId.value = ''
+    objective.value = null
     loading.value = true
     phase.value = 'playing'
     try {
@@ -71,6 +93,33 @@ export const useGameStore = defineStore('game', () => {
     } catch (e) {
       errorMsg.value = '网格加载失败，请确认后端服务已启动'
       console.error('fetchGrid failed', e)
+      phase.value = 'idle'
+    } finally {
+      loading.value = false
+    }
+  }
+
+  /** 闯关模式：开始关卡 */
+  async function startLevel(id: string) {
+    clearTimer()
+    resetState()
+    levelMode.value = true
+    levelId.value = id
+    canNext.value = false
+    nextLevelId.value = null
+    loading.value = true
+    phase.value = 'playing'
+    try {
+      const res = await startLevelApi(id)
+      matchSessionId.value = res.matchSessionId
+      grid.value = res.grid
+      timeLeft.value = res.duration
+      objective.value = res.objective
+      levelTitle.value = res.title
+      timerId = setInterval(tick, 1000)
+    } catch (e) {
+      errorMsg.value = '关卡加载失败'
+      console.error('startLevel failed', e)
       phase.value = 'idle'
     } finally {
       loading.value = false
@@ -99,17 +148,13 @@ export const useGameStore = defineStore('game', () => {
     selectedCells.value = []
   }
 
-  /** 松开提交：调后端校验计分 */
   async function submitSelection() {
     if (phase.value !== 'playing') return
     const cells = [...selectedCells.value]
     const word = currentWord.value
     selectedCells.value = []
 
-    if (cells.length < 2) {
-      // 单字：静默忽略（未完成的无效操作，不触发失败判定与背景闪烁）
-      return
-    }
+    if (cells.length < 2) return
 
     try {
       const res = await submitWord(matchSessionId.value, word, cells)
@@ -127,6 +172,12 @@ export const useGameStore = defineStore('game', () => {
         lastFeedback.value = 'success'
         lastFloatScore.value = res.score
         lastFoundRarity.value = res.rarity ?? null
+        // 完美通关：提前结束并结算（剩余时间加成）
+        if (res.perfect) {
+          perfect.value = true
+          perfectBonus.value = res.perfectBonus ?? 0
+          await endGame()
+        }
       } else if (res.reason === 'duplicate') {
         lastFeedback.value = 'duplicate'
       } else {
@@ -138,22 +189,45 @@ export const useGameStore = defineStore('game', () => {
     }
   }
 
-  /** 结束对局：调后端结算 */
+  /** 结束对局：闯关模式调 submitLevel（含星级），自由模式调 endGame */
   async function endGame() {
     clearTimer()
     phase.value = 'finished'
     try {
-      const res = await endGameApi(matchSessionId.value)
-      score.value = res.score
-      comboScore.value = res.comboScore
-      maxCombo.value = res.maxCombo
-      potentialCount.value = res.potentialCount
-      foundWords.value = res.foundWords.map((f) => ({
-        word: f.word,
-        cells: [],
-        score: f.score,
-        rarity: f.rarity as Rarity,
-      }))
+      if (levelMode.value) {
+        const res = await submitLevelApi(matchSessionId.value)
+        score.value = res.score
+        comboScore.value = res.comboScore
+        maxCombo.value = res.maxCombo
+        potentialCount.value = res.potentialCount
+        lastStars.value = res.stars
+        canNext.value = res.canNext
+        nextLevelId.value = res.nextLevelId
+        perfect.value = res.perfect
+        perfectBonus.value = res.perfectBonus
+        unfoundWords.value = res.unfoundWords
+        foundWords.value = res.foundWords.map((f) => ({
+          word: f.word,
+          cells: [],
+          score: f.score,
+          rarity: f.rarity as Rarity,
+        }))
+      } else {
+        const res = await endGameApi(matchSessionId.value)
+        score.value = res.score
+        comboScore.value = res.comboScore
+        maxCombo.value = res.maxCombo
+        potentialCount.value = res.potentialCount
+        perfect.value = res.perfect
+        perfectBonus.value = res.perfectBonus
+        unfoundWords.value = res.unfoundWords
+        foundWords.value = res.foundWords.map((f) => ({
+          word: f.word,
+          cells: [],
+          score: f.score,
+          rarity: f.rarity as Rarity,
+        }))
+      }
     } catch (e) {
       console.error('endGame failed', e)
     }
@@ -164,19 +238,30 @@ export const useGameStore = defineStore('game', () => {
     phase.value = 'idle'
     matchSessionId.value = ''
     grid.value = []
-    selectedCells.value = []
-    foundWords.value = []
-    score.value = 0
-    timeLeft.value = GAME_DURATION
-    lastFeedback.value = null
-    lastFloatScore.value = null
-    lastFoundRarity.value = null
-    errorMsg.value = null
-    combo.value = 0
-    comboBonus.value = 0
-    comboScore.value = 0
-    maxCombo.value = 0
-    potentialCount.value = 0
+    resetState()
+    levelMode.value = false
+    levelId.value = ''
+    objective.value = null
+    levelTitle.value = ''
+    canNext.value = false
+    nextLevelId.value = null
+  }
+
+  /** 离开对局页清理：未结算时重置（再次进入重新开始），已结算保留数据给结算页 */
+  function abandon() {
+    clearTimer()
+    if (phase.value === 'playing') {
+      phase.value = 'idle'
+      matchSessionId.value = ''
+      grid.value = []
+      resetState()
+      levelMode.value = false
+      levelId.value = ''
+      objective.value = null
+      levelTitle.value = ''
+      canNext.value = false
+      nextLevelId.value = null
+    }
   }
 
   function clearFeedback() {
@@ -203,8 +288,19 @@ export const useGameStore = defineStore('game', () => {
     comboScore,
     maxCombo,
     potentialCount,
+    levelMode,
+    levelId,
+    levelTitle,
+    objective,
+    lastStars,
+    canNext,
+    nextLevelId,
+    perfect,
+    perfectBonus,
+    unfoundWords,
     currentWord,
     startGame,
+    startLevel,
     tick,
     selectCell,
     retreat,
@@ -212,6 +308,7 @@ export const useGameStore = defineStore('game', () => {
     submitSelection,
     endGame,
     restart,
+    abandon,
     clearFeedback,
   }
 })

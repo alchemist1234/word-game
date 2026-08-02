@@ -29,9 +29,8 @@ const size = computed(() => props.grid.length)
 const boardRect = ref<BoardRect>({ left: 0, top: 0, width: 0, height: 0 })
 const cellSize = computed(() => (size.value > 0 ? boardRect.value.width / size.value : 0))
 
-// 测量网格位置（mount + nextTick 确保 rpx 布局完成）
-onMounted(async () => {
-  await nextTick()
+// 测量网格位置（selectorQuery，跨端可靠）
+function measureBoardPosition() {
   const instance = getCurrentInstance()
   const query = instance?.proxy
     ? uni.createSelectorQuery().in(instance.proxy)
@@ -49,6 +48,14 @@ onMounted(async () => {
       }
     })
     .exec()
+}
+
+// mount + 延迟重测：避开页面切换动画导致的坐标偏移（"再来一局"错位）
+onMounted(async () => {
+  await nextTick()
+  measureBoardPosition()
+  setTimeout(measureBoardPosition, 300)
+  setTimeout(measureBoardPosition, 600)
 })
 
 function hitTest(x: number, y: number): CellPos | null {

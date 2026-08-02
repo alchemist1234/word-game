@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onUnmounted } from 'vue'
-import { onShow } from '@dcloudio/uni-app'
+import { onShow, onBackPress, onUnload } from '@dcloudio/uni-app'
 import { useGameStore } from '../../store/game'
 import GridBoard from '../../components/GridBoard.vue'
 import type { CellPos } from '../../core/types'
@@ -11,8 +11,42 @@ const store = useGameStore()
 // 进入页面确保对局进行中
 onShow(() => {
   if (store.phase !== 'playing') {
-    store.startGame()
+    // 闯关模式：从路由参数取 levelId
+    const pages = getCurrentPages()
+    const currentPage = pages[pages.length - 1] as
+      | { options?: { levelId?: string } }
+      | undefined
+    const levelId = currentPage?.options?.levelId
+    if (levelId) {
+      store.startLevel(levelId)
+    } else {
+      store.startGame()
+    }
   }
+})
+
+// 拦截返回：对局进行中弹窗确认，确认后结束对局并结算
+onBackPress(() => {
+  if (store.phase === 'playing') {
+    uni.showModal({
+      title: '结束当前对局',
+      content: '确定要结束当前对局并结算吗？',
+      confirmText: '结算',
+      cancelText: '继续游戏',
+      success: (res) => {
+        if (res.confirm) {
+          store.endGame()
+        }
+      },
+    })
+    return true // 阻止默认返回
+  }
+  return false
+})
+
+// 页面销毁：清理对局（未结算时重置，防止再次进入残留旧对局）
+onUnload(() => {
+  store.abandon()
 })
 
 // 结束 -> 跳结算页
