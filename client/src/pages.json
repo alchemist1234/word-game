@@ -1,0 +1,22 @@
+{
+  "pages": [
+    {
+      "path": "pages/Home/index",
+      "style": { "navigationBarTitleText": "字海寻词" }
+    },
+    {
+      "path": "pages/Game/index",
+      "style": { "navigationBarTitleText": "对局" }
+    },
+    {
+      "path": "pages/Result/index",
+      "style": { "navigationBarTitleText": "结算" }
+    }
+  ],
+  "globalStyle": {
+    "navigationBarTextStyle": "white",
+    "navigationBarTitleText": "字海寻词",
+    "navigationBarBackgroundColor": "#3a2e2e",
+    "backgroundColor": "#f5f0e8"
+  }
+}
