@@ -40,12 +40,22 @@ export class GameService {
       throw new NotFoundException('暂无可用网格，请稍后重试')
     }
     const matchSessionId = uuidv4()
+    // 预存潜在词池 + rarity/length（submitWord/endGame 用内存 Map 判定，不查 PG）
+    const potentialWithRarity = gridEntity.potentialWords.map((w) => {
+      const dict = this.dictionaryService.findByWord(w)
+      return {
+        word: w,
+        rarity: dict?.rarity ?? 'common',
+        length: dict?.length ?? w.length,
+      }
+    })
     await this.redis.hset(`match_session:${matchSessionId}`, {
       gridUuid: gridEntity.id,
       grid: JSON.stringify(gridEntity.grid),
       targetWords: JSON.stringify(gridEntity.targetWords),
       potentialCount: gridEntity.potentialCount.toString(),
       potentialWords: JSON.stringify(gridEntity.potentialWords),
+      potentialWordsWithRarity: JSON.stringify(potentialWithRarity),
       score: '0',
       comboScore: '0',
       combo: '0',
@@ -84,7 +94,14 @@ export class GameService {
     perfectBonus?: number
     remainingSec?: number
   }> {
-    const session = await this.redis.hgetall(`match_session:${matchSessionId}`)
+    const foundKey = `match_session:${matchSessionId}:found`
+    // 读批 pipeline：会话 + 重复检测（2 次往返压 1 次）
+    const readPipe = this.redis.pipeline()
+    readPipe.hgetall(`match_session:${matchSessionId}`)
+    readPipe.sismember(foundKey, word)
+    const readResults = await readPipe.exec()
+    if (!readResults) throw new NotFoundException('对局会话读取失败')
+    const session = readResults[0][1] as Record<string, string>
     if (!session || !session.grid) {
       throw new NotFoundException('对局会话不存在或已过期')
     }
@@ -100,15 +117,16 @@ export class GameService {
       return { valid: false, reason: 'word_not_match' }
     }
 
-    const dictEntry = await this.dictionaryService.findByWord(word)
-    if (!dictEntry) {
-      return { valid: false, reason: 'not_in_dict' }
-    }
-
-    const foundKey = `match_session:${matchSessionId}:found`
-    const isDup = await this.redis.sismember(foundKey, word)
+    const isDup = readResults[1][1] as number
     if (isDup) {
       return { valid: false, reason: 'duplicate' }
+    }
+
+    // 潜在词池判定（内存 Map，不查 PG）
+    const potentialMap = this.buildPotentialMap(session)
+    const entry = potentialMap.get(word)
+    if (!entry) {
+      return { valid: false, reason: 'not_in_dict' }
     }
 
     // 连击演进
@@ -122,24 +140,30 @@ export class GameService {
     const newMaxCombo = Math.max(parseInt(session.maxCombo || '0', 10), combo)
 
     const score =
-      calcScore(dictEntry.length, dictEntry.rarity as Rarity) + comboBonus
+      calcScore(entry.length, entry.rarity as Rarity) + comboBonus
 
-    await this.redis.sadd(foundKey, word)
-    await this.redis.expire(foundKey, SESSION_TTL)
     const currentScore = parseInt(session.score || '0', 10)
     const currentComboScore = parseInt(session.comboScore || '0', 10)
     const newScore = currentScore + score
-    await this.redis.hset(`match_session:${matchSessionId}`, {
+    const potentialCount = parseInt(session.potentialCount || '0', 10)
+
+    // 写批 pipeline：sadd + hset + expire + scard（4 次往返压 1 次）
+    const writePipe = this.redis.pipeline()
+    writePipe.sadd(foundKey, word)
+    writePipe.hset(`match_session:${matchSessionId}`, {
       score: newScore.toString(),
       comboScore: (currentComboScore + comboBonus).toString(),
       combo: combo.toString(),
       maxCombo: newMaxCombo.toString(),
       lastWordAt: now.toString(),
     })
+    writePipe.expire(foundKey, SESSION_TTL)
+    writePipe.scard(foundKey)
+    const writeResults = await writePipe.exec()
+    if (!writeResults) throw new NotFoundException('对局状态写入失败')
 
     // 完美通关检测：找到全部潜在词 -> 提前结束 + 剩余时间加成
-    const foundCount = await this.redis.scard(foundKey)
-    const potentialCount = parseInt(session.potentialCount || '0', 10)
+    const foundCount = writeResults[3][1] as number
     if (foundCount >= potentialCount && potentialCount > 0) {
       const sessionDuration = parseInt(session.duration || '90', 10)
       const startedAt = parseInt(session.startedAt || '0', 10)
@@ -159,7 +183,7 @@ export class GameService {
       return {
         valid: true,
         score,
-        rarity: dictEntry.rarity,
+        rarity: entry.rarity,
         totalScore: scoreWithBonus,
         combo,
         comboBonus,
@@ -173,7 +197,7 @@ export class GameService {
     return {
       valid: true,
       score,
-      rarity: dictEntry.rarity,
+      rarity: entry.rarity,
       totalScore: newScore,
       combo,
       comboBonus,
@@ -201,13 +225,14 @@ export class GameService {
       `match_session:${matchSessionId}:found`,
     )
     const foundWords: Array<{ word: string; score: number; rarity: string }> = []
+    const potentialMap = this.buildPotentialMap(session)
     for (const w of foundWordsStr) {
-      const dict = await this.dictionaryService.findByWord(w)
-      if (dict) {
+      const entry = potentialMap.get(w)
+      if (entry) {
         foundWords.push({
           word: w,
-          score: calcScore(dict.length, dict.rarity as Rarity),
-          rarity: dict.rarity,
+          score: calcScore(entry.length, entry.rarity as Rarity),
+          rarity: entry.rarity,
         })
       }
     }
@@ -232,9 +257,9 @@ export class GameService {
       }
       for (const w of potential) {
         if (foundSet.has(w)) continue
-        const dict = await this.dictionaryService.findByWord(w)
-        if (dict) {
-          unfoundWords.push({ word: w, rarity: dict.rarity })
+        const entry = potentialMap.get(w)
+        if (entry) {
+          unfoundWords.push({ word: w, rarity: entry.rarity })
         }
       }
       unfoundWords.sort(
@@ -253,6 +278,38 @@ export class GameService {
       foundWords,
       unfoundWords,
     }
+  }
+
+  /**
+   * 构建潜在词池 Map（内存判定，不查 PG）
+   * 兼容旧会话：无 potentialWordsWithRarity 时回退词库查询
+   */
+  private buildPotentialMap(
+    session: Record<string, string>,
+  ): Map<string, { word: string; rarity: string; length: number }> {
+    if (session.potentialWordsWithRarity) {
+      const list = JSON.parse(session.potentialWordsWithRarity) as Array<{
+        word: string
+        rarity: string
+        length: number
+      }>
+      return new Map(list.map((p) => [p.word, p]))
+    }
+    // 回退：旧会话无 potentialWordsWithRarity，从 potentialWords + 词库查询构建
+    const potential = session.potentialWords
+      ? (JSON.parse(session.potentialWords) as string[])
+      : []
+    const map = new Map<
+      string,
+      { word: string; rarity: string; length: number }
+    >()
+    for (const w of potential) {
+      const dict = this.dictionaryService.findByWord(w)
+      if (dict) {
+        map.set(w, { word: w, rarity: dict.rarity, length: dict.length })
+      }
+    }
+    return map
   }
 
   /** 图鉴 upsert：已存在 foundCount+1，不存在插入 */

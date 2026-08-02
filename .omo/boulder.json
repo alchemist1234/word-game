@@ -1,0 +1,14 @@
+{
+  "schema_version": 2,
+  "active_work_id": "iter5-stages4-7",
+  "works": {
+    "iter5-stages4-7": {
+      "work_id": "iter5-stages4-7",
+      "active_plan": ".omo/plans/iter5-stages4-7.md",
+      "plan_name": "iter5-stages4-7",
+      "session_ids": ["codex:iter5-stages4-7"],
+      "status": "active",
+      "worktree_path": null
+    }
+  }
+}

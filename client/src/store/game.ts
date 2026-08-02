@@ -3,11 +3,12 @@ import { ref, computed } from 'vue'
 import type { CellPos, FoundWord, GamePhase, Rarity } from '../core/types'
 import {
   fetchGrid,
-  submitWord,
   endGame as endGameApi,
   startLevel as startLevelApi,
   submitLevel as submitLevelApi,
+  type SubmitWordResponse,
 } from '../api'
+import { connectSocket, sendWs, type WsMessage } from '../api/socket'
 
 const GAME_DURATION = 90
 
@@ -42,6 +43,8 @@ export const useGameStore = defineStore('game', () => {
   const perfect = ref(false)
   const perfectBonus = ref(0)
   const unfoundWords = ref<Array<{ word: string; rarity: string }>>([])
+  // WebSocket 提词待匹配队列（消息有序，FIFO 匹配结果到提交的词）
+  const pendingWords = ref<Array<{ word: string; cells: CellPos[] }>>([])
 
   const currentWord = computed(() => {
     if (grid.value.length === 0) return ''
@@ -73,6 +76,7 @@ export const useGameStore = defineStore('game', () => {
     perfect.value = false
     perfectBonus.value = 0
     unfoundWords.value = []
+    pendingWords.value = []
   }
 
   /** 自由模式：开始新一局 */
@@ -148,7 +152,8 @@ export const useGameStore = defineStore('game', () => {
     selectedCells.value = []
   }
 
-  async function submitSelection() {
+  /** WebSocket 提词：发送后不阻塞，结果通过 handleWordResult 异步回调 */
+  function submitSelection() {
     if (phase.value !== 'playing') return
     const cells = [...selectedCells.value]
     const word = currentWord.value
@@ -156,36 +161,61 @@ export const useGameStore = defineStore('game', () => {
 
     if (cells.length < 2) return
 
-    try {
-      const res = await submitWord(matchSessionId.value, word, cells)
-      if (res.valid && res.score !== undefined) {
-        foundWords.value.push({
-          word,
-          cells,
-          score: res.score,
-          rarity: (res.rarity ?? 'common') as Rarity,
-        })
-        score.value = res.totalScore ?? score.value + res.score
-        combo.value = res.combo ?? 0
-        comboBonus.value = res.comboBonus ?? 0
-        maxCombo.value = Math.max(maxCombo.value, combo.value)
-        lastFeedback.value = 'success'
-        lastFloatScore.value = res.score
-        lastFoundRarity.value = res.rarity ?? null
-        // 完美通关：提前结束并结算（剩余时间加成）
-        if (res.perfect) {
-          perfect.value = true
-          perfectBonus.value = res.perfectBonus ?? 0
-          await endGame()
-        }
-      } else if (res.reason === 'duplicate') {
-        lastFeedback.value = 'duplicate'
-      } else {
-        lastFeedback.value = 'fail'
+    // 记录待匹配的词（WebSocket 消息有序，FIFO 匹配结果）
+    pendingWords.value.push({ word, cells })
+    // cells 压缩为 [[r,c],...] 省字节
+    sendWs('submit_word', {
+      sid: matchSessionId.value,
+      word,
+      cells: cells.map((c) => [c.row, c.col]),
+    })
+  }
+
+  /** 处理 WebSocket 返回的提词结果 */
+  function handleWordResult(res: SubmitWordResponse) {
+    const pending = pendingWords.value.shift()
+    if (!pending) return
+
+    if (res.valid && res.score !== undefined) {
+      foundWords.value.push({
+        word: pending.word,
+        cells: pending.cells,
+        score: res.score,
+        rarity: (res.rarity ?? 'common') as Rarity,
+      })
+      score.value = res.totalScore ?? score.value + res.score
+      combo.value = res.combo ?? 0
+      comboBonus.value = res.comboBonus ?? 0
+      maxCombo.value = Math.max(maxCombo.value, combo.value)
+      lastFeedback.value = 'success'
+      lastFloatScore.value = res.score
+      lastFoundRarity.value = res.rarity ?? null
+      // 完美通关：提前结束并结算（剩余时间加成）
+      if (res.perfect) {
+        perfect.value = true
+        perfectBonus.value = res.perfectBonus ?? 0
+        void endGame()
       }
-    } catch (e) {
-      console.error('submitWord failed', e)
+    } else if (res.reason === 'duplicate') {
+      lastFeedback.value = 'duplicate'
+    } else {
       lastFeedback.value = 'fail'
+    }
+  }
+
+  /** WebSocket 消息分发 */
+  function handleWsMessage(msg: WsMessage) {
+    if (msg.event === 'word_result') {
+      handleWordResult(msg.data as SubmitWordResponse)
+    }
+    // pong / error: 无需特殊处理
+  }
+
+  /** 建立 WebSocket 连接（登录后调用） */
+  function connectWs() {
+    const token = uni.getStorageSync('token')
+    if (token) {
+      connectSocket(token, handleWsMessage)
     }
   }
 
@@ -310,5 +340,6 @@ export const useGameStore = defineStore('game', () => {
     restart,
     abandon,
     clearFeedback,
+    connectWs,
   }
 })

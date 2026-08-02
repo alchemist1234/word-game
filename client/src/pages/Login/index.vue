@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { login, sendSmsCode, setToken, getToken } from '../../api'
+import { useGameStore } from '../../store/game'
 
 const phone = ref('')
 const code = ref('')
@@ -30,6 +31,8 @@ async function onLogin() {
   try {
     const res = await login('h5', phone.value, code.value)
     setToken(res.token)
+    // 建立 WebSocket 连接（划词判定走长连接）
+    useGameStore().connectWs()
     uni.reLaunch({ url: '/pages/Chapters/index' })
   } catch (e) {
     errorMsg.value = '登录失败，请检查验证码'
@@ -40,6 +43,7 @@ async function onLogin() {
 
 // 已登录则跳章节
 if (getToken()) {
+  useGameStore().connectWs()
   uni.reLaunch({ url: '/pages/Chapters/index' })
 }
 </script>
