@@ -54,7 +54,7 @@ export class GameService {
       matchSessionId,
       grid: gridEntity.grid,
       size: gridEntity.size,
-      duration: 180,
+      duration: 90, // 1 分 30 秒
     }
   }
 

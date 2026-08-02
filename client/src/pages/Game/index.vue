@@ -50,6 +50,19 @@ const foundCells = computed(() => {
 
 const grid = computed(() => store.grid)
 
+// 已找到词按稀有度从高到低排序（idiom > rare > normal > common）
+const RARITY_ORDER: Record<string, number> = {
+  idiom: 0,
+  rare: 1,
+  normal: 2,
+  common: 3,
+}
+const sortedFoundWords = computed(() =>
+  [...store.foundWords].sort(
+    (a, b) => (RARITY_ORDER[a.rarity] ?? 9) - (RARITY_ORDER[b.rarity] ?? 9),
+  ),
+)
+
 // 倒计时 mm:ss
 const timeText = computed(() => {
   const m = Math.floor(store.timeLeft / 60)
@@ -163,6 +176,18 @@ watch(
       @submit="onSubmit"
       @clear="onClear"
     />
+
+    <view class="found-words">
+      <text v-if="sortedFoundWords.length === 0" class="found-hint">
+        已找到的词显示在这里
+      </text>
+      <text
+        v-for="fw in sortedFoundWords"
+        :key="fw.word"
+        class="word-tag"
+        :class="'tag-' + fw.rarity"
+      >{{ fw.word }}</text>
+    </view>
 
     <view class="float-score" :class="[floatColorClass, { 'float-show': floatVisible }]">
       <template v-if="store.lastFloatScore !== null">
@@ -294,5 +319,44 @@ watch(
 .float-show {
   opacity: 1;
   transform: translateY(0);
+}
+.found-words {
+  width: 620rpx;
+  max-height: 150rpx;
+  margin-top: 16rpx;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  overflow-y: auto;
+}
+.found-hint {
+  font-size: 22rpx;
+  color: #b0a090;
+  padding: 8rpx 0;
+}
+.word-tag {
+  font-size: 22rpx;
+  line-height: 1.2;
+  padding: 4rpx 12rpx;
+  margin: 4rpx;
+  border: 1rpx solid;
+  border-radius: 8rpx;
+  background: #ffffff;
+}
+.tag-idiom {
+  color: #b8860b;
+  border-color: #d4a017;
+}
+.tag-rare {
+  color: #8e44ad;
+  border-color: #8e44ad;
+}
+.tag-normal {
+  color: #4a90d9;
+  border-color: #4a90d9;
+}
+.tag-common {
+  color: #6a5a4a;
+  border-color: #b0a090;
 }
 </style>

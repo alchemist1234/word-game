@@ -7,7 +7,7 @@ import { fetchGrid, submitWord, endGame as endGameApi } from '../api'
  * 单局状态机（迭代2改造：调后端 API，移除本地 gridGen/wordCheck/score）
  * 对齐迭代2详细设计 §8.3
  */
-const GAME_DURATION = 180 // 兜底默认，实际以后端返回 duration 为准
+const GAME_DURATION = 90 // 1 分 30 秒（兜底默认，实际以后端返回 duration 为准）
 
 let timerId: ReturnType<typeof setInterval> | null = null
 
