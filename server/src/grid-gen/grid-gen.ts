@@ -127,63 +127,31 @@ function pickCandidates(dictionary: DictWord[], count: number, idiomRatio: numbe
 }
 
 /**
- * 生成保证至少 minTarget 个目标词可连的网格，并计算潜在词池
+ * 单轮生成：保证至少 minTarget 个目标词可连，返回 GeneratedGrid（含潜在词池）
+ * 失败（目标词未放满）返回 null
  */
-export function generateGrid(
-  difficulty: string,
+function tryGenerateOnce(
+  size: number,
+  minTarget: number,
+  candidateCount: number,
+  idiomRatio: number,
   dictionary: DictWord[],
   trie: Trie,
-  maxRetries = 5,
-): GeneratedGrid {
-  const cfg = DIFFICULTIES[difficulty] ?? DIFFICULTIES.standard
-  const { size, minTarget, candidateCount, idiomRatio } = cfg
-
-  for (let retry = 0; retry < maxRetries; retry++) {
-    const grid = makeEmpty(size)
-    const placed: string[] = []
-    const candidates = pickCandidates(dictionary, candidateCount, idiomRatio)
-
-    for (const w of candidates) {
-      if (placed.length >= candidateCount) break
-      const path = findPath(grid, w.chars, size)
-      if (path) {
-        placeOnGrid(grid, w.chars, path)
-        placed.push(w.word)
-      }
-    }
-
-    if (placed.length >= minTarget) {
-      fillEmpty(grid)
-      const potentialWords = computePotential(
-        grid.map((r) => r.map((c) => c as string)),
-        trie,
-      )
-      return {
-        grid: grid.map((r) => r.map((c) => c as string)),
-        targetWords: placed,
-        potentialCount: potentialWords.length,
-        potentialWords,
-        size,
-      }
-    }
-  }
-
-  // 兜底：放宽 minTarget 重试
-  if (minTarget > 1) {
-    const relaxed: typeof cfg = { ...cfg, minTarget: minTarget - 1 }
-    return generateGridWithCfg(relaxed, dictionary, trie, 3)
-  }
-  // 最终兜底
+): GeneratedGrid | null {
   const grid = makeEmpty(size)
   const placed: string[] = []
-  for (const w of pickCandidates(dictionary, candidateCount + 6, idiomRatio)) {
+  const candidates = pickCandidates(dictionary, candidateCount, idiomRatio)
+
+  for (const w of candidates) {
+    if (placed.length >= candidateCount) break
     const path = findPath(grid, w.chars, size)
     if (path) {
       placeOnGrid(grid, w.chars, path)
       placed.push(w.word)
-      break
     }
   }
+
+  if (placed.length < minTarget) return null
   fillEmpty(grid)
   const potentialWords = computePotential(
     grid.map((r) => r.map((c) => c as string)),
@@ -198,41 +166,59 @@ export function generateGrid(
   }
 }
 
-function generateGridWithCfg(
-  cfg: import('./types').DifficultyConfig,
+/**
+ * 生成网格并做难度校准（技术债 #5 部分）：
+ * 多轮生成，选潜在词池落入 [potentialMin, potentialMax] 区间的网格；
+ * 都不落则选最接近区间中值的。填充字组合优化留迭代5。
+ */
+export function generateGrid(
+  difficulty: string,
   dictionary: DictWord[],
   trie: Trie,
-  maxRetries: number,
+  maxRounds = 10,
 ): GeneratedGrid {
-  const { size, minTarget, candidateCount, idiomRatio } = cfg
-  for (let retry = 0; retry < maxRetries; retry++) {
-    const grid = makeEmpty(size)
-    const placed: string[] = []
-    const candidates = pickCandidates(dictionary, candidateCount, idiomRatio)
-    for (const w of candidates) {
-      if (placed.length >= candidateCount) break
-      const path = findPath(grid, w.chars, size)
-      if (path) {
-        placeOnGrid(grid, w.chars, path)
-        placed.push(w.word)
-      }
+  const cfg = DIFFICULTIES[difficulty] ?? DIFFICULTIES.standard
+  const { size, minTarget, candidateCount, idiomRatio, potentialMin, potentialMax } =
+    cfg
+  const mid = (potentialMin + potentialMax) / 2
+
+  let best: GeneratedGrid | null = null
+  let bestDist = Infinity
+
+  for (let round = 0; round < maxRounds; round++) {
+    const g = tryGenerateOnce(
+      size,
+      minTarget,
+      candidateCount,
+      idiomRatio,
+      dictionary,
+      trie,
+    )
+    if (!g) continue
+    if (g.potentialCount >= potentialMin && g.potentialCount <= potentialMax) {
+      return g // 命中区间，直接返回
     }
-    if (placed.length >= minTarget) {
-      fillEmpty(grid)
-      const potentialWords = computePotential(
-        grid.map((r) => r.map((c) => c as string)),
-        trie,
-      )
-      return {
-        grid: grid.map((r) => r.map((c) => c as string)),
-        targetWords: placed,
-        potentialCount: potentialWords.length,
-        potentialWords,
-        size,
-      }
+    const dist = Math.abs(g.potentialCount - mid)
+    if (dist < bestDist) {
+      bestDist = dist
+      best = g
     }
   }
-  // 最终返回尽力而为
+
+  if (best) return best
+
+  // 兜底：放宽 minTarget 再来一轮
+  const relaxed = tryGenerateOnce(
+    size,
+    Math.max(1, minTarget - 1),
+    candidateCount + 4,
+    idiomRatio,
+    dictionary,
+    trie,
+  )
+  if (relaxed) return relaxed
+
+  // 极兜底：填满字的网格（targetWords 可能为空，极少发生）
   const grid = makeEmpty(size)
   fillEmpty(grid)
   const potentialWords = computePotential(

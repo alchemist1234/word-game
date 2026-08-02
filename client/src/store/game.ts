@@ -24,6 +24,10 @@ export const useGameStore = defineStore('game', () => {
   const lastFoundRarity = ref<string | null>(null)
   const loading = ref(false)
   const errorMsg = ref<string | null>(null)
+  const combo = ref(0)
+  const comboMultiplier = ref(1)
+  const maxCombo = ref(0)
+  const potentialCount = ref(0)
 
   const currentWord = computed(() => {
     if (grid.value.length === 0) return ''
@@ -50,6 +54,10 @@ export const useGameStore = defineStore('game', () => {
     lastFloatScore.value = null
     lastFoundRarity.value = null
     errorMsg.value = null
+    combo.value = 0
+    comboMultiplier.value = 1
+    maxCombo.value = 0
+    potentialCount.value = 0
     loading.value = true
     phase.value = 'playing'
     try {
@@ -111,6 +119,9 @@ export const useGameStore = defineStore('game', () => {
           rarity: (res.rarity ?? 'common') as Rarity,
         })
         score.value = res.totalScore ?? score.value + res.score
+        combo.value = res.combo ?? 0
+        comboMultiplier.value = res.comboMultiplier ?? 1
+        maxCombo.value = Math.max(maxCombo.value, combo.value)
         lastFeedback.value = 'success'
         lastFloatScore.value = res.score
         lastFoundRarity.value = res.rarity ?? null
@@ -132,6 +143,8 @@ export const useGameStore = defineStore('game', () => {
     try {
       const res = await endGameApi(matchSessionId.value)
       score.value = res.score
+      maxCombo.value = res.maxCombo
+      potentialCount.value = res.potentialCount
       foundWords.value = res.foundWords.map((f) => ({
         word: f.word,
         cells: [],
@@ -156,6 +169,10 @@ export const useGameStore = defineStore('game', () => {
     lastFloatScore.value = null
     lastFoundRarity.value = null
     errorMsg.value = null
+    combo.value = 0
+    comboMultiplier.value = 1
+    maxCombo.value = 0
+    potentialCount.value = 0
   }
 
   function clearFeedback() {
@@ -177,6 +194,10 @@ export const useGameStore = defineStore('game', () => {
     lastFoundRarity,
     loading,
     errorMsg,
+    combo,
+    comboMultiplier,
+    maxCombo,
+    potentialCount,
     currentWord,
     startGame,
     tick,

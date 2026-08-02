@@ -5,11 +5,13 @@ import Redis from 'ioredis'
 import { v4 as uuidv4 } from 'uuid'
 import { GridPoolService } from '../grid-pool/grid-pool.service'
 import { DictionaryService } from '../dictionary/dictionary.service'
-import { validatePath, calcScore } from './check'
+import { validatePath, calcScore, calcComboMultiplier } from './check'
 import type { CellPos, Rarity } from '../grid-gen/types'
 import { REDIS_TOKEN } from '../common/redis.module'
 
 const SESSION_TTL = 600 // 10 分钟（对局时长 + 缓冲）
+const COMBO_WINDOW_MS = 10000 // 连击窗口：10 秒（对齐 GDD §2.4.3）
+const MAX_COMBO = 10 // 连击封顶
 
 /**
  * 游戏业务服务：取网格 / 提词校验计分 / 结算
@@ -39,7 +41,11 @@ export class GameService {
       gridUuid: gridEntity.id,
       grid: JSON.stringify(gridEntity.grid),
       targetWords: JSON.stringify(gridEntity.targetWords),
+      potentialCount: gridEntity.potentialCount.toString(),
       score: '0',
+      combo: '0',
+      maxCombo: '0',
+      lastWordAt: '',
       startedAt: Date.now().toString(),
     })
     await this.redis.expire(`match_session:${matchSessionId}`, SESSION_TTL)
@@ -63,6 +69,8 @@ export class GameService {
     rarity?: string
     totalScore?: number
     combo?: number
+    comboMultiplier?: number
+    comboRemainingMs?: number
   }> {
     const session = await this.redis.hgetall(`match_session:${matchSessionId}`)
     if (!session || !session.grid) {
@@ -95,28 +103,51 @@ export class GameService {
       return { valid: false, reason: 'duplicate' }
     }
 
-    // 5. 计分
-    const score = calcScore(dictEntry.length, dictEntry.rarity as Rarity)
+    // 5. 连击演进（对齐 GDD §2.4.3）
+    const now = Date.now()
+    const lastWordAt = parseInt(session.lastWordAt || '0', 10)
+    let combo = 0
+    if (lastWordAt > 0 && now - lastWordAt <= COMBO_WINDOW_MS) {
+      combo = Math.min(parseInt(session.combo || '0', 10) + 1, MAX_COMBO)
+    }
+    const comboMultiplier = calcComboMultiplier(combo)
+    const newMaxCombo = Math.max(parseInt(session.maxCombo || '0', 10), combo)
 
-    // 6. 更新会话
+    // 6. 计分
+    const score = calcScore(
+      dictEntry.length,
+      dictEntry.rarity as Rarity,
+      comboMultiplier,
+    )
+
+    // 7. 更新会话
     await this.redis.sadd(foundKey, word)
     await this.redis.expire(foundKey, SESSION_TTL)
     const currentScore = parseInt(session.score || '0', 10)
     const newScore = currentScore + score
-    await this.redis.hset(`match_session:${matchSessionId}`, 'score', newScore.toString())
+    await this.redis.hset(`match_session:${matchSessionId}`, {
+      score: newScore.toString(),
+      combo: combo.toString(),
+      maxCombo: newMaxCombo.toString(),
+      lastWordAt: now.toString(),
+    })
 
     return {
       valid: true,
       score,
       rarity: dictEntry.rarity,
       totalScore: newScore,
-      combo: 0, // 迭代2无连击
+      combo,
+      comboMultiplier,
+      comboRemainingMs: COMBO_WINDOW_MS,
     }
   }
 
   /** 结算 */
   async endGame(matchSessionId: string): Promise<{
     score: number
+    maxCombo: number
+    potentialCount: number
     foundWords: Array<{ word: string; score: number; rarity: string }>
   }> {
     const session = await this.redis.hgetall(`match_session:${matchSessionId}`)
@@ -141,6 +172,8 @@ export class GameService {
     foundWords.sort((a, b) => b.score - a.score)
     return {
       score: parseInt(session.score || '0', 10),
+      maxCombo: parseInt(session.maxCombo || '0', 10),
+      potentialCount: parseInt(session.potentialCount || '0', 10),
       foundWords,
     }
   }

@@ -23,10 +23,20 @@ const RARITY_MULT: Record<Rarity, number> = {
   idiom: 2.5,
 }
 
-/** 计分：字数基础分 × 稀有度系数，四舍五入 */
-export function calcScore(length: number, rarity: Rarity): number {
+/** 计分：字数基础分 × 稀有度系数 × 连击系数，四舍五入（对齐 GDD §2.4） */
+export function calcScore(
+  length: number,
+  rarity: Rarity,
+  comboMultiplier = 1,
+): number {
   const base = BASE_SCORE[length] ?? 35
-  return Math.round(base * RARITY_MULT[rarity])
+  return Math.round(base * RARITY_MULT[rarity] * comboMultiplier)
+}
+
+/** 连击系数：1 + 0.1 × min(combo, 10)，封顶 ×2.0（对齐 GDD §2.4.3） */
+export function calcComboMultiplier(combo: number): number {
+  // Math.round(x*10)/10 消除浮点误差（如 0.1*7 = 0.7000000000000001 → 1.7）
+  return Math.round((1 + 0.1 * Math.min(combo, 10)) * 10) / 10
 }
 
 /** 判定两格是否 8 向相邻（与 grid-gen 的 DIRS 一致） */

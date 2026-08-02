@@ -14,6 +14,12 @@ const idiomCount = computed(
   () => store.foundWords.filter((w) => w.rarity === 'idiom').length,
 )
 
+// 潜在词池覆盖率（对齐迭代3详细设计 §7）
+const coveragePercent = computed(() => {
+  if (store.potentialCount <= 0) return null
+  return Math.round((store.foundWords.length / store.potentialCount) * 100)
+})
+
 function playAgain() {
   store.startGame()
   uni.redirectTo({ url: '/pages/Game/index' })
@@ -35,6 +41,16 @@ function goHome() {
     <view class="stats">
       <text class="stat">找到 {{ store.foundWords.length }} 个词</text>
       <text class="stat">含 {{ idiomCount }} 个成语</text>
+      <text class="stat">最高连击 ×{{ store.maxCombo }}</text>
+    </view>
+
+    <view v-if="coveragePercent !== null" class="coverage">
+      <text class="coverage-text">
+        本局可形成 {{ store.potentialCount }} 个词，你找到了 {{ store.foundWords.length }} 个（{{ coveragePercent }}%）
+      </text>
+      <view class="coverage-track">
+        <view class="coverage-fill" :style="{ width: coveragePercent + '%' }" />
+      </view>
     </view>
 
     <scroll-view class="word-list" scroll-y>
@@ -92,17 +108,37 @@ function goHome() {
 .stats {
   display: flex;
   flex-direction: row;
-  gap: 40rpx;
-  margin-bottom: 32rpx;
+  gap: 32rpx;
+  margin-bottom: 24rpx;
 }
 .stat {
-  font-size: 28rpx;
+  font-size: 26rpx;
   color: #6a5a4a;
+}
+.coverage {
+  width: 100%;
+  margin-bottom: 24rpx;
+}
+.coverage-text {
+  font-size: 24rpx;
+  color: #8a7a6a;
+}
+.coverage-track {
+  height: 12rpx;
+  background: #e8e0d0;
+  border-radius: 6rpx;
+  margin-top: 8rpx;
+  overflow: hidden;
+}
+.coverage-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #4caf50, #8bc34a);
+  border-radius: 6rpx;
 }
 .word-list {
   width: 100%;
   flex: 1;
-  max-height: 600rpx;
+  max-height: 560rpx;
 }
 .word-item {
   display: flex;

@@ -20,10 +20,14 @@ export interface SubmitWordResponse {
   rarity?: string
   totalScore?: number
   combo?: number
+  comboMultiplier?: number
+  comboRemainingMs?: number
 }
 
 export interface EndGameResponse {
   score: number
+  maxCombo: number
+  potentialCount: number
   foundWords: Array<{ word: string; score: number; rarity: string }>
 }
 

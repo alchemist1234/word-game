@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onUnmounted } from 'vue'
 import { onShow } from '@dcloudio/uni-app'
 import { useGameStore } from '../../store/game'
 import GridBoard from '../../components/GridBoard.vue'
 import type { CellPos } from '../../core/types'
+import { playSuccess, playIdiom, playFail, playCombo } from '../../utils/sound'
 
 const store = useGameStore()
 
@@ -58,11 +59,46 @@ const timeText = computed(() => {
 
 const isLowTime = computed(() => store.timeLeft <= 30)
 
-// 飘字与反馈：成功飘字 + 失败震动
+// 连击倒计时（本地 UI 显示，服务端权威判定一致性）
+const COMBO_WINDOW = 10000
+const comboCountdownMs = ref(0)
+let comboInterval: ReturnType<typeof setInterval> | null = null
+
+const comboBarWidth = computed(
+  () => `${Math.max(0, (comboCountdownMs.value / COMBO_WINDOW) * 100)}%`,
+)
+
+function startComboCountdown() {
+  comboCountdownMs.value = COMBO_WINDOW
+  if (comboInterval) clearInterval(comboInterval)
+  comboInterval = setInterval(() => {
+    comboCountdownMs.value -= 100
+    if (comboCountdownMs.value <= 0) {
+      comboCountdownMs.value = 0
+      if (comboInterval) {
+        clearInterval(comboInterval)
+        comboInterval = null
+      }
+    }
+  }, 100)
+}
+
+onUnmounted(() => {
+  if (comboInterval) clearInterval(comboInterval)
+})
+
+// 飘字与反馈：成功飘字（稀有度颜色）+ 失败震动 + 音效
 const floatVisible = ref(false)
 const failFlash = ref(false)
 let floatTimer: ReturnType<typeof setTimeout> | null = null
 let failTimer: ReturnType<typeof setTimeout> | null = null
+
+const floatColorClass = computed(() => {
+  if (store.lastFoundRarity === 'idiom') return 'float-idiom'
+  if (store.lastFoundRarity === 'rare') return 'float-rare'
+  if (store.lastFoundRarity === 'normal') return 'float-normal'
+  return 'float-common'
+})
 
 watch(
   () => store.lastFeedback,
@@ -70,6 +106,10 @@ watch(
     if (!fb) return
     if (fb === 'success') {
       floatVisible.value = true
+      if (store.lastFoundRarity === 'idiom') playIdiom()
+      else playSuccess()
+      if (store.combo >= 1) playCombo(store.combo)
+      startComboCountdown()
       if (floatTimer) clearTimeout(floatTimer)
       floatTimer = setTimeout(() => {
         floatVisible.value = false
@@ -77,6 +117,7 @@ watch(
       }, 800)
     } else if (fb === 'fail') {
       failFlash.value = true
+      playFail()
       uni.vibrateShort({ type: 'light' })
       if (failTimer) clearTimeout(failTimer)
       failTimer = setTimeout(() => {
@@ -98,6 +139,15 @@ watch(
       <text class="score">{{ store.score }}<text class="score-unit">分</text></text>
     </view>
 
+    <view class="combo-bar" :class="{ 'combo-idle': store.combo === 0 }">
+      <text v-if="store.combo > 0" class="combo-text">
+        连击 ×{{ store.combo }}<text class="combo-mult">（×{{ store.comboMultiplier.toFixed(1) }}）</text>
+      </text>
+      <view class="combo-track">
+        <view class="combo-fill" :style="{ width: comboBarWidth }" />
+      </view>
+    </view>
+
     <view class="current-word">
       <text v-if="store.currentWord" class="word-text">{{ store.currentWord }}</text>
       <text v-else class="word-placeholder">滑动连接相邻汉字</text>
@@ -114,8 +164,11 @@ watch(
       @clear="onClear"
     />
 
-    <view class="float-score" :class="{ 'float-show': floatVisible }">
-      <text v-if="store.lastFloatScore !== null">+{{ store.lastFloatScore }}</text>
+    <view class="float-score" :class="[floatColorClass, { 'float-show': floatVisible }]">
+      <template v-if="store.lastFloatScore !== null">
+        <text>+{{ store.lastFloatScore }}</text>
+        <text v-if="store.comboMultiplier > 1" class="float-mult">×{{ store.comboMultiplier.toFixed(1) }}</text>
+      </template>
     </view>
   </view>
 </template>
@@ -160,6 +213,39 @@ watch(
   color: #8a7a6a;
   margin-left: 8rpx;
 }
+.combo-bar {
+  width: 620rpx;
+  height: 52rpx; /* 固定高度占位：连击条显隐不影响网格布局，避免 hitTest 错位 */
+  margin-bottom: 8rpx;
+  overflow: hidden;
+}
+.combo-idle {
+  visibility: hidden; /* 无连击时内容隐藏但保留高度，网格位置稳定 */
+}
+.combo-text {
+  display: block;
+  font-size: 26rpx;
+  line-height: 34rpx; /* 固定行高，防止文本溢出被 height/overflow 裁剪 */
+  color: #d97a1e;
+  font-weight: bold;
+}
+.combo-mult {
+  font-size: 22rpx;
+  color: #d97a1e;
+}
+.combo-track {
+  height: 10rpx;
+  background: #e8e0d0;
+  border-radius: 5rpx;
+  margin-top: 6rpx;
+  overflow: hidden;
+}
+.combo-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #d97a1e, #f0a030);
+  border-radius: 5rpx;
+  transition: width 0.1s linear;
+}
 .current-word {
   width: 620rpx;
   height: 80rpx;
@@ -188,6 +274,22 @@ watch(
   transform: translateY(20rpx);
   transition: opacity 0.2s, transform 0.2s;
   pointer-events: none;
+}
+.float-common {
+  color: #4caf50;
+}
+.float-normal {
+  color: #4a90d9;
+}
+.float-rare {
+  color: #8e44ad;
+}
+.float-idiom {
+  color: #d4a017;
+}
+.float-mult {
+  font-size: 36rpx;
+  margin-left: 8rpx;
 }
 .float-show {
   opacity: 1;

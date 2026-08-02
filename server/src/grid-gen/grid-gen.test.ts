@@ -132,6 +132,17 @@ describe('generateGrid', () => {
       expect(canFindWord(g.grid, w)).toBe(true)
     }
   })
+
+  it('多轮选优后潜在词池稳定且 >= 目标词数（难度校准不破坏可解性）', () => {
+    for (let i = 0; i < 10; i++) {
+      const g = generateGrid('standard', testDict, trie)
+      expect(g.potentialCount).toBeGreaterThanOrEqual(g.targetWords.length)
+      expect(g.potentialCount).toBeGreaterThan(0)
+      for (const w of g.targetWords) {
+        expect(canFindWord(g.grid, w)).toBe(true)
+      }
+    }
+  })
 })
 
 describe('computePotential', () => {
