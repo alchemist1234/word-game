@@ -1,28 +1,20 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { CellPos, DictWord, FoundWord, GamePhase, GeneratedGrid } from '../core/types'
-import { generateGrid } from '../core/gridGen'
-import { checkWord, type WordCheckContext } from '../core/wordCheck'
-import dictionary from '../data/dictionary.json'
-
-// 词库索引（启动时构建一次）
-const dict = dictionary as DictWord[]
-const wordSet = new Set(dict.map((d) => d.word))
-const wordMap = new Map(dict.map((d) => [d.word, d]))
-
-const GAME_DURATION = 180 // 3 分钟（对齐 GDD §2.5）
-const GRID_SIZE = 5
-
-// 模块级定时器引用（避免响应式包裹）
-let timerId: ReturnType<typeof setInterval> | null = null
+import type { CellPos, FoundWord, GamePhase, Rarity } from '../core/types'
+import { fetchGrid, submitWord, endGame as endGameApi } from '../api'
 
 /**
- * 单局状态机（对齐详细设计 §5.4）
- * 职责：网格生成、连线选中维护、提词提交计分、倒计时、阶段流转
+ * 单局状态机（迭代2改造：调后端 API，移除本地 gridGen/wordCheck/score）
+ * 对齐迭代2详细设计 §8.3
  */
+const GAME_DURATION = 180 // 兜底默认，实际以后端返回 duration 为准
+
+let timerId: ReturnType<typeof setInterval> | null = null
+
 export const useGameStore = defineStore('game', () => {
   const phase = ref<GamePhase>('idle')
-  const grid = ref<GeneratedGrid | null>(null)
+  const matchSessionId = ref<string>('')
+  const grid = ref<string[][]>([])
   const selectedCells = ref<CellPos[]>([])
   const foundWords = ref<FoundWord[]>([])
   const score = ref(0)
@@ -30,12 +22,13 @@ export const useGameStore = defineStore('game', () => {
   const lastFeedback = ref<'success' | 'fail' | 'duplicate' | null>(null)
   const lastFloatScore = ref<number | null>(null)
   const lastFoundRarity = ref<string | null>(null)
+  const loading = ref(false)
+  const errorMsg = ref<string | null>(null)
 
-  // 当前已选词（由 selectedCells 在网格上拼成）
   const currentWord = computed(() => {
-    if (!grid.value) return ''
+    if (grid.value.length === 0) return ''
     return selectedCells.value
-      .map((c) => grid.value!.grid[c.row][c.col])
+      .map((c) => grid.value[c.row][c.col])
       .join('')
   })
 
@@ -46,10 +39,9 @@ export const useGameStore = defineStore('game', () => {
     }
   }
 
-  /** 开始新一局：生成网格、重置状态、启动倒计时 */
-  function startGame() {
+  /** 开始新一局：从后端拉网格、重置状态、启动倒计时 */
+  async function startGame() {
     clearTimer()
-    grid.value = generateGrid(GRID_SIZE, dict)
     selectedCells.value = []
     foundWords.value = []
     score.value = 0
@@ -57,11 +49,24 @@ export const useGameStore = defineStore('game', () => {
     lastFeedback.value = null
     lastFloatScore.value = null
     lastFoundRarity.value = null
+    errorMsg.value = null
+    loading.value = true
     phase.value = 'playing'
-    timerId = setInterval(tick, 1000)
+    try {
+      const res = await fetchGrid(5, 'standard')
+      matchSessionId.value = res.matchSessionId
+      grid.value = res.grid
+      timeLeft.value = res.duration
+      timerId = setInterval(tick, 1000)
+    } catch (e) {
+      errorMsg.value = '网格加载失败，请确认后端服务已启动'
+      console.error('fetchGrid failed', e)
+      phase.value = 'idle'
+    } finally {
+      loading.value = false
+    }
   }
 
-  /** 每秒倒计时，到点结束 */
   function tick() {
     if (phase.value !== 'playing') return
     timeLeft.value--
@@ -70,25 +75,22 @@ export const useGameStore = defineStore('game', () => {
     }
   }
 
-  /** 连线交互：追加一个格子（由 GridBoard 判定相邻后调用） */
   function selectCell(cell: CellPos) {
     if (phase.value !== 'playing') return
     selectedCells.value.push(cell)
   }
 
-  /** 连线交互：回退最后一个格子（手指滑回倒数第二格时） */
   function retreat() {
     if (phase.value !== 'playing') return
     selectedCells.value.pop()
   }
 
-  /** 清空当前选中（不提交，用于异常恢复） */
   function clearSelection() {
     selectedCells.value = []
   }
 
-  /** 松开提交：拼词 -> 校验 -> 计分 / 反馈 -> 清空选中 */
-  function submitSelection() {
+  /** 松开提交：调后端校验计分 */
+  async function submitSelection() {
     if (phase.value !== 'playing') return
     const cells = [...selectedCells.value]
     const word = currentWord.value
@@ -99,42 +101,53 @@ export const useGameStore = defineStore('game', () => {
       return
     }
 
-    const ctx: WordCheckContext = {
-      wordSet,
-      wordMap,
-      foundWords: foundWords.value,
-    }
-    const result = checkWord(word, cells, ctx)
-
-    if (result.valid && result.score !== undefined && result.rarity) {
-      foundWords.value.push({
-        word,
-        cells,
-        score: result.score,
-        rarity: result.rarity,
-      })
-      score.value += result.score
-      lastFeedback.value = 'success'
-      lastFloatScore.value = result.score
-      lastFoundRarity.value = result.rarity
-    } else if (result.reason === 'duplicate') {
-      lastFeedback.value = 'duplicate'
-    } else {
+    try {
+      const res = await submitWord(matchSessionId.value, word, cells)
+      if (res.valid && res.score !== undefined) {
+        foundWords.value.push({
+          word,
+          cells,
+          score: res.score,
+          rarity: (res.rarity ?? 'common') as Rarity,
+        })
+        score.value = res.totalScore ?? score.value + res.score
+        lastFeedback.value = 'success'
+        lastFloatScore.value = res.score
+        lastFoundRarity.value = res.rarity ?? null
+      } else if (res.reason === 'duplicate') {
+        lastFeedback.value = 'duplicate'
+      } else {
+        lastFeedback.value = 'fail'
+      }
+    } catch (e) {
+      console.error('submitWord failed', e)
       lastFeedback.value = 'fail'
     }
   }
 
-  /** 结束对局（时间到或主动结束） */
-  function endGame() {
+  /** 结束对局：调后端结算 */
+  async function endGame() {
     clearTimer()
     phase.value = 'finished'
+    try {
+      const res = await endGameApi(matchSessionId.value)
+      score.value = res.score
+      foundWords.value = res.foundWords.map((f) => ({
+        word: f.word,
+        cells: [],
+        score: f.score,
+        rarity: f.rarity as Rarity,
+      }))
+    } catch (e) {
+      console.error('endGame failed', e)
+    }
   }
 
-  /** 重置回 idle（返回首页） */
   function restart() {
     clearTimer()
     phase.value = 'idle'
-    grid.value = null
+    matchSessionId.value = ''
+    grid.value = []
     selectedCells.value = []
     foundWords.value = []
     score.value = 0
@@ -142,9 +155,9 @@ export const useGameStore = defineStore('game', () => {
     lastFeedback.value = null
     lastFloatScore.value = null
     lastFoundRarity.value = null
+    errorMsg.value = null
   }
 
-  /** 清除一次性反馈（飘字/提示），供 UI 消费后重置 */
   function clearFeedback() {
     lastFeedback.value = null
     lastFloatScore.value = null
@@ -152,8 +165,8 @@ export const useGameStore = defineStore('game', () => {
   }
 
   return {
-    // state
     phase,
+    matchSessionId,
     grid,
     selectedCells,
     foundWords,
@@ -162,9 +175,9 @@ export const useGameStore = defineStore('game', () => {
     lastFeedback,
     lastFloatScore,
     lastFoundRarity,
-    // computed
+    loading,
+    errorMsg,
     currentWord,
-    // actions
     startGame,
     tick,
     selectCell,

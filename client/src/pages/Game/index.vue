@@ -47,7 +47,7 @@ const foundCells = computed(() => {
   return set
 })
 
-const grid = computed(() => store.grid?.grid ?? [])
+const grid = computed(() => store.grid)
 
 // 倒计时 mm:ss
 const timeText = computed(() => {

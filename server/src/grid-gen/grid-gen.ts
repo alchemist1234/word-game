@@ -1,15 +1,17 @@
 import type { CellPos, DictWord, GeneratedGrid } from './types'
+import { DIFFICULTIES } from './types'
+import type { Trie } from './trie'
+import { computePotential } from './potential'
 
 /**
- * 网格生成器（简化版，技术债 #1，迭代 2 换 Go 服务端版）
- * 对齐详细设计 §5.1
+ * 网格生成器（迁移自迭代1 gridGen.ts，增强：难度配置 + 潜在词池）
+ * 对齐迭代2详细设计 §5.3 / GDD §3.2.2
  *
- * 策略：从词库选候选词 -> 回溯为每个词找相邻空闲路径放置（字可复用）
- *      -> 剩余空格填高频字 -> 保证至少 minTarget 个目标词可连
+ * 原 Go grid-service 的工作，按"装Docker Go并入Nest.js"决策改用 TS 实现。
  */
 
-/** 高频填充字池（用于剩余空格，增加偶然成词） */
-export const FILLER_CHARS = [
+/** 高频填充字池 */
+const FILLER_CHARS = [
   '的', '了', '是', '在', '有', '人', '这', '中', '大', '为',
   '上', '个', '国', '我', '以', '要', '他', '时', '来', '用',
   '们', '生', '到', '作', '地', '于', '出', '就', '分', '对',
@@ -21,11 +23,10 @@ export const FILLER_CHARS = [
   '明', '心', '事', '日', '水', '手', '口', '目',
 ]
 
-/** 8 向偏移（与 wordCheck.isAdjacent 严格一致） */
 const DIRS: ReadonlyArray<readonly [number, number]> = [
   [-1, -1], [-1, 0], [-1, 1],
-  [0, -1],           [0, 1],
-  [1, -1],  [1, 0],  [1, 1],
+  [0, -1], [0, 1],
+  [1, -1], [1, 0], [1, 1],
 ]
 
 function makeEmpty(size: number): (string | null)[][] {
@@ -61,12 +62,7 @@ function allCells(size: number): CellPos[] {
   return cells
 }
 
-/** 回溯为 chars 找一条相邻路径，字可复用已放置的同字格子 */
-function findPath(
-  grid: (string | null)[][],
-  chars: string[],
-  size: number,
-): CellPos[] | null {
+function findPath(grid: (string | null)[][], chars: string[], size: number): CellPos[] | null {
   for (const start of shuffle(allCells(size))) {
     const visited = new Set<string>([cellKey(start)])
     const result = backtrack(grid, chars, 0, start, [start], visited)
@@ -85,8 +81,8 @@ function backtrack(
 ): CellPos[] | null {
   const ch = chars[idx]
   const existing = grid[cell.row][cell.col]
-  if (existing !== null && existing !== ch) return null // 冲突：已有不同字
-  if (idx === chars.length - 1) return path // 已放完最后一个字
+  if (existing !== null && existing !== ch) return null
+  if (idx === chars.length - 1) return path
 
   for (const [dr, dc] of shuffle(DIRS)) {
     const nb: CellPos = { row: cell.row + dr, col: cell.col + dc }
@@ -102,32 +98,28 @@ function backtrack(
   return null
 }
 
-function placeOnGrid(
-  grid: (string | null)[][],
-  chars: string[],
-  path: CellPos[],
-): void {
+function placeOnGrid(grid: (string | null)[][], chars: string[], path: CellPos[]): void {
   for (let i = 0; i < chars.length; i++) {
     const { row, col } = path[i]
     if (grid[row][col] === null) grid[row][col] = chars[i]
   }
 }
 
-function fillEmpty(grid: (string | null)[][], fillers: string[]): void {
+function fillEmpty(grid: (string | null)[][]): void {
   for (let r = 0; r < grid.length; r++) {
     for (let c = 0; c < grid[r].length; c++) {
       if (grid[r][c] === null) {
-        grid[r][c] = fillers[Math.floor(Math.random() * fillers.length)]
+        grid[r][c] = FILLER_CHARS[Math.floor(Math.random() * FILLER_CHARS.length)]
       }
     }
   }
 }
 
-/** 从词库选候选词：80% 短词(2-3字) + 20% 成语(4字) */
-function pickCandidates(dictionary: DictWord[], count: number): DictWord[] {
+/** 按难度选候选词：idiomRatio 控制成语占比 */
+function pickCandidates(dictionary: DictWord[], count: number, idiomRatio: number): DictWord[] {
   const short = dictionary.filter((w) => w.length <= 3)
   const idioms = dictionary.filter((w) => w.length === 4)
-  const idiomCount = Math.max(1, Math.round(count * 0.2))
+  const idiomCount = Math.max(1, Math.round(count * idiomRatio))
   const picked: DictWord[] = []
   picked.push(...shuffle(short).slice(0, Math.max(0, count - idiomCount)))
   picked.push(...shuffle(idioms).slice(0, idiomCount))
@@ -135,19 +127,21 @@ function pickCandidates(dictionary: DictWord[], count: number): DictWord[] {
 }
 
 /**
- * 生成保证至少 minTarget 个目标词可连的网格
+ * 生成保证至少 minTarget 个目标词可连的网格，并计算潜在词池
  */
 export function generateGrid(
-  size: number,
+  difficulty: string,
   dictionary: DictWord[],
-  minTarget = 3,
-  candidateCount = 6,
+  trie: Trie,
   maxRetries = 5,
 ): GeneratedGrid {
+  const cfg = DIFFICULTIES[difficulty] ?? DIFFICULTIES.standard
+  const { size, minTarget, candidateCount, idiomRatio } = cfg
+
   for (let retry = 0; retry < maxRetries; retry++) {
     const grid = makeEmpty(size)
     const placed: string[] = []
-    const candidates = pickCandidates(dictionary, candidateCount)
+    const candidates = pickCandidates(dictionary, candidateCount, idiomRatio)
 
     for (const w of candidates) {
       if (placed.length >= candidateCount) break
@@ -159,24 +153,30 @@ export function generateGrid(
     }
 
     if (placed.length >= minTarget) {
-      fillEmpty(grid, FILLER_CHARS)
+      fillEmpty(grid)
+      const potentialWords = computePotential(
+        grid.map((r) => r.map((c) => c as string)),
+        trie,
+      )
       return {
         grid: grid.map((r) => r.map((c) => c as string)),
         targetWords: placed,
+        potentialCount: potentialWords.length,
+        potentialWords,
         size,
       }
     }
   }
 
-  // 兜底：放宽 minTarget 重试（递减到 1 后走最终兜底，保证终止）
+  // 兜底：放宽 minTarget 重试
   if (minTarget > 1) {
-    return generateGrid(size, dictionary, minTarget - 1, candidateCount + 2, 3)
+    const relaxed: typeof cfg = { ...cfg, minTarget: minTarget - 1 }
+    return generateGridWithCfg(relaxed, dictionary, trie, 3)
   }
-
-  // 最终兜底：尽力放置至少 1 个词，仍失败则返回填满字的无目标网格
+  // 最终兜底
   const grid = makeEmpty(size)
   const placed: string[] = []
-  for (const w of pickCandidates(dictionary, candidateCount + 6)) {
+  for (const w of pickCandidates(dictionary, candidateCount + 6, idiomRatio)) {
     const path = findPath(grid, w.chars, size)
     if (path) {
       placeOnGrid(grid, w.chars, path)
@@ -184,10 +184,66 @@ export function generateGrid(
       break
     }
   }
-  fillEmpty(grid, FILLER_CHARS)
+  fillEmpty(grid)
+  const potentialWords = computePotential(
+    grid.map((r) => r.map((c) => c as string)),
+    trie,
+  )
   return {
     grid: grid.map((r) => r.map((c) => c as string)),
     targetWords: placed,
+    potentialCount: potentialWords.length,
+    potentialWords,
+    size,
+  }
+}
+
+function generateGridWithCfg(
+  cfg: import('./types').DifficultyConfig,
+  dictionary: DictWord[],
+  trie: Trie,
+  maxRetries: number,
+): GeneratedGrid {
+  const { size, minTarget, candidateCount, idiomRatio } = cfg
+  for (let retry = 0; retry < maxRetries; retry++) {
+    const grid = makeEmpty(size)
+    const placed: string[] = []
+    const candidates = pickCandidates(dictionary, candidateCount, idiomRatio)
+    for (const w of candidates) {
+      if (placed.length >= candidateCount) break
+      const path = findPath(grid, w.chars, size)
+      if (path) {
+        placeOnGrid(grid, w.chars, path)
+        placed.push(w.word)
+      }
+    }
+    if (placed.length >= minTarget) {
+      fillEmpty(grid)
+      const potentialWords = computePotential(
+        grid.map((r) => r.map((c) => c as string)),
+        trie,
+      )
+      return {
+        grid: grid.map((r) => r.map((c) => c as string)),
+        targetWords: placed,
+        potentialCount: potentialWords.length,
+        potentialWords,
+        size,
+      }
+    }
+  }
+  // 最终返回尽力而为
+  const grid = makeEmpty(size)
+  fillEmpty(grid)
+  const potentialWords = computePotential(
+    grid.map((r) => r.map((c) => c as string)),
+    trie,
+  )
+  return {
+    grid: grid.map((r) => r.map((c) => c as string)),
+    targetWords: [],
+    potentialCount: potentialWords.length,
+    potentialWords,
     size,
   }
 }
