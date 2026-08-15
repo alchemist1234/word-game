@@ -175,7 +175,7 @@ export function generateGrid(
   difficulty: string,
   dictionary: DictWord[],
   trie: Trie,
-  maxRounds = 10,
+  maxRounds = 15,
 ): GeneratedGrid {
   const cfg = DIFFICULTIES[difficulty] ?? DIFFICULTIES.standard
   const { size, minTarget, candidateCount, idiomRatio, potentialMin, potentialMax } =

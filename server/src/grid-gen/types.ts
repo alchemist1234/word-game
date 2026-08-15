@@ -39,5 +39,5 @@ export interface DifficultyConfig {
 export const DIFFICULTIES: Record<string, DifficultyConfig> = {
   easy: { size: 4, minTarget: 5, candidateCount: 7, idiomRatio: 0.1, potentialMin: 15, potentialMax: 25 },
   standard: { size: 5, minTarget: 8, candidateCount: 12, idiomRatio: 0.25, potentialMin: 30, potentialMax: 50 },
-  hard: { size: 6, minTarget: 14, candidateCount: 20, idiomRatio: 0.4, potentialMin: 60, potentialMax: 100 },
+  hard: { size: 6, minTarget: 14, candidateCount: 24, idiomRatio: 0.4, potentialMin: 60, potentialMax: 100 },
 }

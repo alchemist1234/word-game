@@ -1,0 +1,18 @@
+{
+  "name": "word-game",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "directories": {
+    "doc": "doc"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "type": "commonjs",
+  "dependencies": {
+    "puppeteer-core": "^21.11.0",
+    "ws": "^8.21.2"
+  }
+}

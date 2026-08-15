@@ -128,6 +128,7 @@ export interface LevelStartResponse {
   objective: { type: string; target?: number; score?: number; char?: string }
   stars: number[]
   title: string
+  boss?: boolean
 }
 export interface LevelSubmitResponse extends EndGameResponse {
   stars: number
@@ -141,7 +142,7 @@ export interface ChaptersResponse {
     chapter: number
     title: string
     unlocked: boolean
-    levels: Array<{ id: string; title: string; stars: number; unlocked: boolean }>
+    levels: Array<{ id: string; title: string; stars: number; unlocked: boolean; boss?: boolean }>
   }>
 }
 

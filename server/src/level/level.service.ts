@@ -22,6 +22,7 @@ interface LevelConfig {
   objective: { type: string; target?: number; score?: number; char?: string }
   stars: number[]
   duration: number
+  boss?: boolean
 }
 
 const LEVELS = levelsConfig as LevelConfig[]
@@ -29,6 +30,9 @@ const CHAPTER_TITLES: Record<number, string> = {
   1: '初识字海',
   2: '春夏秋冬',
   3: '诗词雅韵',
+  4: '节气节日',
+  5: '历史典故',
+  6: '山川地理',
 }
 
 @Injectable()
@@ -76,6 +80,7 @@ export class LevelService {
             title: l.title,
             stars: progressMap.get(l.id)?.stars ?? 0,
             unlocked: this.isLevelUnlocked(l, levels, progressMap),
+            boss: !!l.boss,
           })),
         }
       })
@@ -106,6 +111,7 @@ export class LevelService {
     objective: LevelConfig['objective']
     stars: number[]
     title: string
+    boss: boolean
   }> {
     const cfg = LEVELS.find((l) => l.id === levelId)
     if (!cfg) throw new NotFoundException('关卡不存在')
@@ -123,6 +129,7 @@ export class LevelService {
       objective: cfg.objective,
       stars: cfg.stars,
       title: cfg.title,
+      boss: !!cfg.boss,
     }
   }
 

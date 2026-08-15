@@ -183,6 +183,7 @@ watch(
   <view class="game" :class="{ 'game-fail': failFlash }">
     <view class="topbar">
       <text class="timer" :class="{ 'timer-low': isLowTime }">{{ timeText }}</text>
+      <text v-if="store.isBossLevel" class="boss-label">Boss</text>
       <text class="score">{{ store.score }}<text class="score-unit">分</text></text>
     </view>
 
@@ -261,6 +262,14 @@ watch(
 }
 .timer-low {
   color: #d94a4a;
+}
+.boss-label {
+  font-size: 24rpx;
+  color: #fff;
+  background: #d94a4a;
+  border-radius: 8rpx;
+  padding: 4rpx 14rpx;
+  font-weight: bold;
 }
 .score {
   font-size: 48rpx;

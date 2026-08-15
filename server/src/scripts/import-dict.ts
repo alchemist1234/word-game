@@ -45,9 +45,9 @@ async function main(): Promise<void> {
   entries.sort((a, b) => b.freq - a.freq)
   const maxFreq = entries[0]?.freq ?? 1
 
-  // 选取：成语 1500 + 非成语 4000，去重
-  const idioms = entries.filter((e) => e.pos === 'i').slice(0, 1500)
-  const nonIdioms = entries.filter((e) => e.pos !== 'i').slice(0, 4000)
+  // 选取：成语 3750 + 非成语 11250，去重
+  const idioms = entries.filter((e) => e.pos === 'i').slice(0, 3750)
+  const nonIdioms = entries.filter((e) => e.pos !== 'i').slice(0, 11250)
   const seen = new Set<string>()
   const selected: RawEntry[] = []
   for (const e of [...idioms, ...nonIdioms]) {

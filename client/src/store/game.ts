@@ -43,6 +43,7 @@ export const useGameStore = defineStore('game', () => {
   const perfect = ref(false)
   const perfectBonus = ref(0)
   const unfoundWords = ref<Array<{ word: string; rarity: string }>>([])
+  const isBossLevel = ref(false)
   // WebSocket 提词待匹配队列（消息有序，FIFO 匹配结果到提交的词）
   const pendingWords = ref<Array<{ word: string; cells: CellPos[] }>>([])
 
@@ -77,6 +78,7 @@ export const useGameStore = defineStore('game', () => {
     perfectBonus.value = 0
     unfoundWords.value = []
     pendingWords.value = []
+    isBossLevel.value = false
   }
 
   /** 自由模式：开始新一局 */
@@ -120,6 +122,7 @@ export const useGameStore = defineStore('game', () => {
       timeLeft.value = res.duration
       objective.value = res.objective
       levelTitle.value = res.title
+      isBossLevel.value = res.boss ?? false
       timerId = setInterval(tick, 1000)
     } catch (e) {
       errorMsg.value = '关卡加载失败'
@@ -275,6 +278,7 @@ export const useGameStore = defineStore('game', () => {
     levelTitle.value = ''
     canNext.value = false
     nextLevelId.value = null
+    isBossLevel.value = false
   }
 
   /** 离开对局页清理：未结算时重置（再次进入重新开始），已结算保留数据给结算页 */
@@ -291,6 +295,7 @@ export const useGameStore = defineStore('game', () => {
       levelTitle.value = ''
       canNext.value = false
       nextLevelId.value = null
+      isBossLevel.value = false
     }
   }
 
@@ -328,6 +333,7 @@ export const useGameStore = defineStore('game', () => {
     perfect,
     perfectBonus,
     unfoundWords,
+    isBossLevel,
     currentWord,
     startGame,
     startLevel,

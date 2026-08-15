@@ -59,11 +59,12 @@ function onLogout() {
             v-for="lv in ch.levels"
             :key="lv.id"
             class="level-node"
-            :class="{ unlocked: lv.unlocked, locked: !lv.unlocked }"
+            :class="{ unlocked: lv.unlocked, locked: !lv.unlocked, boss: lv.boss }"
             @tap="onLevel(lv.id, lv.unlocked)"
           >
             <text class="level-num">{{ lv.id }}</text>
             <text class="level-title">{{ lv.title }}</text>
+            <text v-if="lv.boss" class="boss-tag">Boss</text>
             <text class="level-stars">
               {{ lv.stars >= 1 ? '★' : '☆' }}{{ lv.stars >= 2 ? '★' : '☆' }}{{ lv.stars >= 3 ? '★' : '☆' }}
             </text>
@@ -108,8 +109,10 @@ function onLogout() {
   align-items: center;
 }
 .level-node.unlocked { border-color: #4a90d9; }
+.level-node.boss { border-color: #d94a4a; }
 .level-node.locked { opacity: 0.4; background: #e8e0d0; }
 .level-num { font-size: 22rpx; color: #8a7a6a; }
 .level-title { font-size: 26rpx; color: #3a2e2e; margin: 4rpx 0; }
+.boss-tag { font-size: 20rpx; color: #fff; background: #d94a4a; border-radius: 8rpx; padding: 2rpx 10rpx; margin-top: 4rpx; }
 .level-stars { font-size: 24rpx; color: #d4a017; }
 </style>

@@ -17,6 +17,7 @@
     "@dcloudio/uni-h5": "3.0.0-alpha-5020320260731001",
     "@dcloudio/uni-mp-weixin": "3.0.0-alpha-5020320260731001",
     "pinia": "^4.0.2",
+    "puppeteer-core": "^25.4.0",
     "vue": "^3.5.40"
   },
   "devDependencies": {
