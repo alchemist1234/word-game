@@ -9,6 +9,7 @@ import { validatePath, calcScore, calcComboBonus } from './check'
 import type { CellPos, Rarity } from '../grid-gen/types'
 import { REDIS_TOKEN } from '../common/redis.module'
 import { UserFoundWordEntity } from '../user/user-found-word.entity'
+import { GridPoolEntity } from '../grid-pool/grid-pool.entity'
 
 const SESSION_TTL = 600
 const COMBO_WINDOW_MS = 10000
@@ -24,7 +25,7 @@ export class GameService {
     private readonly foundWordRepo: Repository<UserFoundWordEntity>,
   ) {}
 
-  /** 取一张网格并创建对局会话 */
+  /** 取一张网格并创建对局会话（单人/自由模式） */
   async getGrid(
     difficulty: string,
     userId: number,
@@ -39,6 +40,25 @@ export class GameService {
     if (!gridEntity) {
       throw new NotFoundException('暂无可用网格，请稍后重试')
     }
+    return this.createSessionFromGrid(gridEntity, userId, duration)
+  }
+
+  /**
+   * 用指定网格创建对局会话（对战模式复用：双方同一 gridEntity，保证同网格）
+   * 迭代6详细设计 §2.1：对战每玩家独立 match_session，hset 附加 matchId 标记
+   */
+  async createSessionFromGrid(
+    gridEntity: GridPoolEntity,
+    userId: number,
+    duration = 90,
+    matchId?: string,
+  ): Promise<{
+    matchSessionId: string
+    grid: string[][]
+    size: number
+    duration: number
+    gridSeed: string
+  }> {
     const matchSessionId = uuidv4()
     // 预存潜在词池 + rarity/length（submitWord/endGame 用内存 Map 判定，不查 PG）
     const potentialWithRarity = gridEntity.potentialWords.map((w) => {
@@ -49,7 +69,7 @@ export class GameService {
         length: dict?.length ?? w.length,
       }
     })
-    await this.redis.hset(`match_session:${matchSessionId}`, {
+    const sessionFields: Record<string, string> = {
       gridUuid: gridEntity.id,
       grid: JSON.stringify(gridEntity.grid),
       targetWords: JSON.stringify(gridEntity.targetWords),
@@ -66,13 +86,16 @@ export class GameService {
       isPerfect: '0',
       perfectBonus: '0',
       startedAt: Date.now().toString(),
-    })
+    }
+    if (matchId) sessionFields.matchId = matchId
+    await this.redis.hset(`match_session:${matchSessionId}`, sessionFields)
     await this.redis.expire(`match_session:${matchSessionId}`, SESSION_TTL)
     return {
       matchSessionId,
       grid: gridEntity.grid,
       size: gridEntity.size,
       duration,
+      gridSeed: gridEntity.id,
     }
   }
 
@@ -93,6 +116,7 @@ export class GameService {
     perfect?: boolean
     perfectBonus?: number
     remainingSec?: number
+    matchId?: string
   }> {
     const foundKey = `match_session:${matchSessionId}:found`
     // 读批 pipeline：会话 + 重复检测（2 次往返压 1 次）
@@ -162,9 +186,9 @@ export class GameService {
     const writeResults = await writePipe.exec()
     if (!writeResults) throw new NotFoundException('对局状态写入失败')
 
-    // 完美通关检测：找到全部潜在词 -> 提前结束 + 剩余时间加成
+    // 完美通关检测：找到全部潜在词 -> 提前结束 + 剩余时间加成（对战模式固定时长，不触发）
     const foundCount = writeResults[3][1] as number
-    if (foundCount >= potentialCount && potentialCount > 0) {
+    if (!session.matchId && foundCount >= potentialCount && potentialCount > 0) {
       const sessionDuration = parseInt(session.duration || '90', 10)
       const startedAt = parseInt(session.startedAt || '0', 10)
       const elapsedSec =
@@ -191,6 +215,7 @@ export class GameService {
         perfect: true,
         perfectBonus,
         remainingSec,
+        matchId: session.matchId,
       }
     }
 
@@ -203,6 +228,7 @@ export class GameService {
       comboBonus,
       comboRemainingMs: COMBO_WINDOW_MS,
       perfect: false,
+      matchId: session.matchId,
     }
   }
 

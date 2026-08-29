@@ -5,8 +5,16 @@
       "style": { "navigationBarTitleText": "登录" }
     },
     {
+      "path": "pages/Home/index",
+      "style": { "navigationBarTitleText": "字海寻词" }
+    },
+    {
       "path": "pages/Chapters/index",
       "style": { "navigationBarTitleText": "章节地图" }
+    },
+    {
+      "path": "pages/Battle/index",
+      "style": { "navigationBarTitleText": "实时对战" }
     },
     {
       "path": "pages/Game/index",

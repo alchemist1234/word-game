@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, nextTick, getCurrentInstance } from 'vue'
 import type { CellPos } from '../core/types'
+import { hitCell } from '../core/gridHit'
 
 /**
  * GridBoard 网格连线交互组件（对齐详细设计 §6/§7.4）
@@ -27,7 +28,8 @@ interface BoardRect { left: number; top: number; width: number; height: number }
 
 const size = computed(() => props.grid.length)
 const boardRect = ref<BoardRect>({ left: 0, top: 0, width: 0, height: 0 })
-const cellSize = computed(() => (size.value > 0 ? boardRect.value.width / size.value : 0))
+// 实时校准值（非响应式：mousedown capture 中更新不触发重渲染中断）
+let liveBoardRect = { left: 0, top: 0, width: 0, height: 0 }
 
 // 测量网格位置（selectorQuery，跨端可靠）
 function measureBoardPosition() {
@@ -56,15 +58,58 @@ onMounted(async () => {
   measureBoardPosition()
   setTimeout(measureBoardPosition, 300)
   setTimeout(measureBoardPosition, 600)
+  // H5：网格位置校准（滚动/窗口 resize 后消除命中偏差）
+  // - resize/scroll 监听更新响应式 boardRect（低频，事件外）
+  // - 指针按下 capture 阶段更新非响应式 liveBoardRect（先于 Vue handler，不触发重渲染中断）
+  // #ifdef H5
+  // uni-app H5 的事件对象（normalizeMouseEvent/normalizeTouchEvent）会把 clientY 换算成
+  // "页面显示区"坐标系——减去 getWindowTop()（= CSS var --window-top + safe-area-inset-top，
+  // 默认导航栏时即导航栏高度）。而 getBoundingClientRect() 返回浏览器视口坐标。
+  // 两者混用会让命中区域整体竖直偏移一个顶部窗口高度（点方格上半部分被识别成上方格）。
+  // 因此实时测量矩形必须换算到与事件相同的坐标系：top 减同一偏移，left/x 不偏移。
+  const getWindowTopOffset = () => {
+    const style = document.documentElement.style
+    const m = (style.getPropertyValue('--window-top').match(/\d+/) || ['0'])[0]
+    const num = parseInt(m, 10)
+    return Number.isFinite(num) && num > 0 ? num : 0
+  }
+  const readLiveRect = () => {
+    const el = document.querySelector('.board')
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    if (r.width <= 0) return null
+    return {
+      left: r.left,
+      top: r.top - getWindowTopOffset(),
+      width: r.width,
+      height: r.height,
+    }
+  }
+  // 实时 querySelector：组件重渲染可能替换 board 节点，缓存旧节点会导致校准失效
+  const refreshBoardPos = () => {
+    const rect = readLiveRect()
+    if (rect) boardRect.value = rect
+  }
+  const refreshLivePos = () => {
+    const rect = readLiveRect()
+    if (rect) liveBoardRect = rect
+  }
+  // uni-view 自定义元素上的原生监听不可靠（uni-app 事件系统接管），改用 document capture
+  // 事件传播：document(capture) → ... → board(bubble) → Vue handler，校准先于命中
+  document.addEventListener('mousedown', refreshLivePos, true)
+  document.addEventListener('touchstart', refreshLivePos, true)
+  window.addEventListener('resize', refreshBoardPos)
+  window.addEventListener('scroll', refreshBoardPos, true)
+  // #endif
 })
 
 function hitTest(x: number, y: number): CellPos | null {
-  const cs = cellSize.value
-  if (cs <= 0) return null
-  const col = Math.floor((x - boardRect.value.left) / cs)
-  const row = Math.floor((y - boardRect.value.top) / cs)
-  if (row < 0 || row >= size.value || col < 0 || col >= size.value) return null
-  return { row, col }
+  // 行列分别按宽/高等分（core/gridHit 纯函数，已单测）：
+  // board 非正方形（布局拉伸）时格子视觉行高 = height/size，
+  // 用单一宽度 cs 算行索引会系统性偏差（点击行上半部分被算到上方格子）
+  // 位置优先用指针按下时校准的 liveBoardRect（滚动/窗口 resize 后准确），未校准回退 boardRect
+  const rect = liveBoardRect.width > 0 ? liveBoardRect : boardRect.value
+  return hitCell(rect, size.value, x, y)
 }
 
 function sameCell(a: CellPos, b: CellPos): boolean {
@@ -100,20 +145,25 @@ function handleMove(x: number, y: number) {
   if (props.selectedCells.length === 0) return
   const cells = props.selectedCells
   const current = cells[cells.length - 1]
-  const cs = cellSize.value
-  if (cs <= 0) return
+  // 行列分别按宽/高等分（与 hitTest 一致，board 非正方形时行中心准确）
+  const useLive = liveBoardRect.width > 0
+  const csW = (useLive ? liveBoardRect.width : boardRect.value.width) / size.value
+  const csH = (useLive ? liveBoardRect.height : boardRect.value.height) / size.value
+  if (csW <= 0 || csH <= 0) return
+  const left = useLive ? liveBoardRect.left : boardRect.value.left
+  const top = useLive ? liveBoardRect.top : boardRect.value.top
 
   // 1. 必须命中其他格子（进入方格才考虑）
   const hit = hitTest(x, y)
   if (!hit || sameCell(hit, current)) return
 
   // 2. 手指相对 current 中心的位移（用于方向判定）
-  const cx = current.col * cs + cs / 2
-  const cy = current.row * cs + cs / 2
-  const dx = x - boardRect.value.left - cx
-  const dy = y - boardRect.value.top - cy
+  const cx = current.col * csW + csW / 2
+  const cy = current.row * csH + csH / 2
+  const dx = x - left - cx
+  const dy = y - top - cy
   const dist = Math.sqrt(dx * dx + dy * dy)
-  if (dist < cs * 0.2) return // 位移太小，方向不可靠
+  if (dist < csW * 0.2) return // 位移太小，方向不可靠
 
   // 3. 方向一致性：命中格方向 == 手指移动方向
   const hitDirRow = Math.sign(hit.row - current.row)
@@ -212,16 +262,18 @@ interface LineSeg {
   angle: number
 }
 const lines = computed<LineSeg[]>(() => {
-  const cs = cellSize.value
-  if (cs <= 0 || props.selectedCells.length < 2) return []
+  const useLive = liveBoardRect.width > 0
+  const csW = (useLive ? liveBoardRect.width : boardRect.value.width) / size.value
+  const csH = (useLive ? liveBoardRect.height : boardRect.value.height) / size.value
+  if (csW <= 0 || csH <= 0 || props.selectedCells.length < 2) return []
   const result: LineSeg[] = []
   for (let i = 1; i < props.selectedCells.length; i++) {
     const a = props.selectedCells[i - 1]
     const b = props.selectedCells[i]
-    const ax = a.col * cs + cs / 2
-    const ay = a.row * cs + cs / 2
-    const bx = b.col * cs + cs / 2
-    const by = b.row * cs + cs / 2
+    const ax = a.col * csW + csW / 2
+    const ay = a.row * csH + csH / 2
+    const bx = b.col * csW + csW / 2
+    const by = b.row * csH + csH / 2
     const dx = bx - ax
     const dy = by - ay
     const len = Math.sqrt(dx * dx + dy * dy)

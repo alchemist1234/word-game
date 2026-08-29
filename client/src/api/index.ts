@@ -184,3 +184,36 @@ export async function fetchPokedex(): Promise<PokedexResponse> {
   if (!res.ok) throw new Error('获取图鉴失败')
   return res.json()
 }
+
+// ===== Match API（迭代6：实时 1v1 对战） =====
+export interface MatchQueueResponse {
+  status: 'queued' | 'matched' | 'timeout'
+  matchId?: string
+  elapsedSec?: number
+  grid?: string[][]
+  size?: number
+  duration?: number
+  mySid?: string
+  opponent?: { nickname: string; rankTier: number }
+}
+
+/** 入队匹配（对战固定 standard 5×5，180s） */
+export async function queueMatch(): Promise<{ status: string; matchId?: string }> {
+  const res = await request('/match/queue', { method: 'POST' })
+  if (!res.ok) throw new Error('匹配入队失败')
+  return res.json()
+}
+
+/** 轮询匹配状态：queued / matched / timeout */
+export async function matchQueueStatus(): Promise<MatchQueueResponse> {
+  const res = await request('/match/queue')
+  if (!res.ok) throw new Error('匹配状态查询失败')
+  return res.json()
+}
+
+/** 取消排队 */
+export async function cancelMatchQueue(): Promise<{ cancelled: boolean }> {
+  const res = await request('/match/queue', { method: 'DELETE' })
+  if (!res.ok) throw new Error('取消匹配失败')
+  return res.json()
+}

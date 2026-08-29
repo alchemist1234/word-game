@@ -44,6 +44,56 @@ export const useGameStore = defineStore('game', () => {
   const perfectBonus = ref(0)
   const unfoundWords = ref<Array<{ word: string; rarity: string }>>([])
   const isBossLevel = ref(false)
+  // 对战模式（迭代6：实时 1v1）
+  const matchMode = ref(false)
+  const matchId = ref('')
+  const mySid = ref('')
+  const opponent = ref<{
+    nickname: string
+    rankTier: number
+    score: number
+    combo: number
+  } | null>(null)
+  const matchRemaining = ref(0)
+  const matchPhase = ref<'idle' | 'queuing' | 'countdown' | 'playing' | 'finished'>('idle')
+  const matchEnd = ref<{
+    winnerUserId: number | null
+    my: MatchPlayerView
+    opponent: MatchPlayerView
+  } | null>(null)
+  const wsConnected = ref(false)
+  const opponentDelta = ref<{ delta: number; total: number } | null>(null)
+
+  interface MatchPlayerView {
+    score: number
+    rareCount: number
+    maxCombo: number
+    foundWords: Array<{ word: string; score: number; rarity: string }>
+  }
+  interface MatchStartData {
+    matchId: string
+    grid: string[][]
+    size: number
+    duration: number
+    mySid: string
+    opponent: { nickname: string; rankTier: number }
+  }
+
+  /** 应用对战开局数据（WS match_start 广播或轮询 matched 兜底） */
+  function applyMatchStartData(d: MatchStartData) {
+    matchMode.value = true
+    matchId.value = d.matchId
+    mySid.value = d.mySid
+    matchSessionId.value = d.mySid
+    grid.value = d.grid
+    score.value = 0
+    combo.value = 0
+    foundWords.value = []
+    matchRemaining.value = d.duration
+    matchPhase.value = 'countdown'
+    phase.value = 'playing'
+    opponent.value = { ...d.opponent, score: 0, combo: 0 }
+  }
   // WebSocket 提词待匹配队列（消息有序，FIFO 匹配结果到提交的词）
   const pendingWords = ref<Array<{ word: string; cells: CellPos[] }>>([])
 
@@ -210,6 +260,73 @@ export const useGameStore = defineStore('game', () => {
   function handleWsMessage(msg: WsMessage) {
     if (msg.event === 'word_result') {
       handleWordResult(msg.data as SubmitWordResponse)
+      return
+    }
+    // 对战事件（迭代6）
+    if (msg.event === 'match_start') {
+      applyMatchStartData(msg.data as MatchStartData)
+      return
+    }
+    if (msg.event === 'match_countdown') {
+      matchPhase.value = 'countdown'
+      return
+    }
+    if (msg.event === 'match_tick') {
+      const d = msg.data as {
+        remainingSec: number
+        myScore: number
+        opponentScore: number
+        myCombo: number
+        opponentCombo: number
+      }
+      matchRemaining.value = d.remainingSec
+      score.value = d.myScore
+      combo.value = d.myCombo
+      phase.value = 'playing'
+      if (opponent.value) {
+        opponent.value.score = d.opponentScore
+        opponent.value.combo = d.opponentCombo
+      }
+      matchPhase.value = 'playing'
+      return
+    }
+    if (msg.event === 'match_opponent_score') {
+      opponentDelta.value = msg.data as { delta: number; total: number }
+      return
+    }
+    if (msg.event === 'match_restore') {
+      const d = msg.data as {
+        matchId: string
+        remainingSec: number
+        myScore: number
+        opponentScore: number
+        grid: string[][]
+        size: number
+        mySid: string
+        opponent: { nickname: string; rankTier: number }
+      }
+      matchMode.value = true
+      matchId.value = d.matchId
+      mySid.value = d.mySid
+      matchSessionId.value = d.mySid
+      grid.value = d.grid
+      matchRemaining.value = d.remainingSec
+      score.value = d.myScore
+      matchPhase.value = 'playing'
+      phase.value = 'playing'
+      opponent.value = { ...d.opponent, score: d.opponentScore, combo: 0 }
+      return
+    }
+    if (msg.event === 'match_end') {
+      matchEnd.value = msg.data as {
+        winnerUserId: number | null
+        my: MatchPlayerView
+        opponent: MatchPlayerView
+      }
+      matchPhase.value = 'finished'
+      phase.value = 'idle'
+      matchRemaining.value = 0
+      return
     }
     // pong / error: 无需特殊处理
   }
@@ -218,7 +335,13 @@ export const useGameStore = defineStore('game', () => {
   function connectWs() {
     const token = uni.getStorageSync('token')
     if (token) {
-      connectSocket(token, handleWsMessage)
+      connectSocket(token, handleWsMessage, (connected) => {
+        wsConnected.value = connected
+        // 断线重连成功且在对局中：发送 match_join 恢复房间
+        if (connected && matchMode.value && matchId.value && matchPhase.value !== 'finished') {
+          sendWs('match_join', { matchId: matchId.value })
+        }
+      })
     }
   }
 
@@ -272,6 +395,7 @@ export const useGameStore = defineStore('game', () => {
     matchSessionId.value = ''
     grid.value = []
     resetState()
+    clearMatchState()
     levelMode.value = false
     levelId.value = ''
     objective.value = null
@@ -289,6 +413,7 @@ export const useGameStore = defineStore('game', () => {
       matchSessionId.value = ''
       grid.value = []
       resetState()
+      clearMatchState()
       levelMode.value = false
       levelId.value = ''
       objective.value = null
@@ -303,6 +428,28 @@ export const useGameStore = defineStore('game', () => {
     lastFeedback.value = null
     lastFloatScore.value = null
     lastFoundRarity.value = null
+  }
+  /** 清理对战状态（离开对战/重开时） */
+  function clearMatchState() {
+    matchMode.value = false
+    matchId.value = ''
+    mySid.value = ''
+    opponent.value = null
+    matchRemaining.value = 0
+    matchPhase.value = 'idle'
+    matchEnd.value = null
+    opponentDelta.value = null
+  }
+
+  /** 对战结束/离开时清理（页面调用） */
+  function resetMatch() {
+    clearTimer()
+    matchSessionId.value = ''
+    grid.value = []
+    foundWords.value = []
+    score.value = 0
+    combo.value = 0
+    clearMatchState()
   }
 
   return {
@@ -334,6 +481,15 @@ export const useGameStore = defineStore('game', () => {
     perfectBonus,
     unfoundWords,
     isBossLevel,
+    matchMode,
+    matchId,
+    mySid,
+    opponent,
+    matchRemaining,
+    matchPhase,
+    matchEnd,
+    wsConnected,
+    opponentDelta,
     currentWord,
     startGame,
     startLevel,
@@ -345,6 +501,8 @@ export const useGameStore = defineStore('game', () => {
     endGame,
     restart,
     abandon,
+    resetMatch,
+    applyMatchStartData,
     clearFeedback,
     connectWs,
   }

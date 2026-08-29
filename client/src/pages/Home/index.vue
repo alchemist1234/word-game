@@ -1,26 +1,48 @@
 <script setup lang="ts">
-import { useGameStore } from '../../store/game'
+import { clearToken } from '../../api'
+import { disconnectSocket } from '../../api/socket'
 
-const store = useGameStore()
-
-function startGame() {
-  store.startGame()
-  uni.navigateTo({ url: '/pages/Game/index' })
+/** 大厅首页（GDD §6.1 P0）：入口聚合，对齐迭代6详细设计 §8.1 */
+function onChapters() {
+  uni.navigateTo({ url: '/pages/Chapters/index' })
+}
+function onBattle() {
+  uni.navigateTo({ url: '/pages/Battle/index' })
+}
+function onPokedex() {
+  uni.navigateTo({ url: '/pages/Pokedex/index' })
+}
+function onLogout() {
+  disconnectSocket()
+  clearToken()
+  uni.reLaunch({ url: '/pages/Login/index' })
 }
 </script>
 
 <template>
   <view class="home">
-    <view class="title-wrap">
-      <text class="title">字海寻词</text>
-      <text class="subtitle">汉字网格 · 连线组词</text>
+    <view class="title">字海寻词</view>
+    <view class="subtitle">连线组词 · 实时竞技</view>
+
+    <view class="menu">
+      <view class="menu-item" @tap="onChapters">
+        <text class="menu-icon">章</text>
+        <text class="menu-label">单人闯关</text>
+        <text class="menu-desc">章节地图 · 星级挑战</text>
+      </view>
+      <view class="menu-item" @tap="onBattle">
+        <text class="menu-icon battle">战</text>
+        <text class="menu-label">实时对战</text>
+        <text class="menu-desc">同网格 1v1 · 实时比拼</text>
+      </view>
+      <view class="menu-item" @tap="onPokedex">
+        <text class="menu-icon pokedex">鉴</text>
+        <text class="menu-label">词库图鉴</text>
+        <text class="menu-desc">收集你找到的词</text>
+      </view>
     </view>
-    <view class="rules">
-      <text class="rule">在 5×5 网格中连接相邻汉字</text>
-      <text class="rule">组成词语得分，成语高分</text>
-      <text class="rule">3 分钟内尽可能多找词</text>
-    </view>
-    <button class="start-btn" @tap="startGame">开始游戏</button>
+
+    <view class="logout" @tap="onLogout">退出登录</view>
   </view>
 </template>
 
@@ -29,49 +51,65 @@ function startGame() {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding-top: 200rpx;
   min-height: 100vh;
-  background: linear-gradient(180deg, #f5f0e8 0%, #ede4d3 100%);
-}
-.title-wrap {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  margin-bottom: 80rpx;
+  background: #f5f0e8;
+  padding: 120rpx 40rpx 60rpx;
+  box-sizing: border-box;
 }
 .title {
-  font-size: 80rpx;
+  font-size: 72rpx;
   font-weight: bold;
   color: #3a2e2e;
-  letter-spacing: 8rpx;
+  letter-spacing: 12rpx;
 }
 .subtitle {
   font-size: 28rpx;
   color: #8a7a6a;
   margin-top: 16rpx;
 }
-.rules {
+.menu {
+  width: 100%;
+  margin-top: 100rpx;
   display: flex;
   flex-direction: column;
+  gap: 28rpx;
+}
+.menu-item {
+  background: #ffffff;
+  border-radius: 16rpx;
+  border: 2rpx solid #d4c8b8;
+  padding: 32rpx;
+  display: flex;
+  flex-direction: row;
   align-items: center;
-  margin-bottom: 100rpx;
+  gap: 24rpx;
 }
-.rule {
-  font-size: 26rpx;
-  color: #6a5a4a;
-  line-height: 48rpx;
-}
-.start-btn {
-  width: 400rpx;
-  height: 96rpx;
-  line-height: 96rpx;
+.menu-icon {
+  width: 88rpx;
+  height: 88rpx;
+  border-radius: 16rpx;
   background: #4a90d9;
-  color: #ffffff;
-  font-size: 36rpx;
-  border-radius: 48rpx;
-  border: none;
+  color: #fff;
+  font-size: 40rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
-.start-btn::after {
-  border: none;
+.menu-icon.battle { background: #d94a4a; }
+.menu-icon.pokedex { background: #d4a017; }
+.menu-label {
+  font-size: 34rpx;
+  font-weight: bold;
+  color: #3a2e2e;
+}
+.menu-desc {
+  font-size: 24rpx;
+  color: #8a7a6a;
+}
+.logout {
+  margin-top: auto;
+  font-size: 28rpx;
+  color: #b0a090;
+  padding: 24rpx 0 0;
 }
 </style>

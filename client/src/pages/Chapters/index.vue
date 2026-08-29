@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import { onShow } from '@dcloudio/uni-app'
 import { fetchChapters, clearToken, type ChaptersResponse } from '../../api'
+import { disconnectSocket } from '../../api/socket'
 
 const data = ref<ChaptersResponse | null>(null)
 const loading = ref(true)
@@ -29,6 +30,7 @@ function onPokedex() {
 }
 
 function onLogout() {
+  disconnectSocket()
   clearToken()
   uni.reLaunch({ url: '/pages/Login/index' })
 }

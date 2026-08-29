@@ -16,4 +16,14 @@ export default defineConfig({
       },
     },
   },
+  preview: {
+    // 生产构建预览同样代理 /api -> Nest.js（用于稳定环境联调）
+    proxy: {
+      '/api': {
+        target: 'http://localhost:3000',
+        changeOrigin: true,
+        ws: true,
+      },
+    },
+  },
 })

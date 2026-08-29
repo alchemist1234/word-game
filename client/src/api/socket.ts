@@ -12,6 +12,7 @@ export interface WsMessage {
 
 let socketTask: UniApp.SocketTask | null = null
 let messageHandler: ((msg: WsMessage) => void) | null = null
+let statusHandler: ((connected: boolean) => void) | null = null
 let reconnectAttempts = 0
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null
 let shouldReconnect = true
@@ -37,6 +38,7 @@ function doConnect(token: string): void {
   socketTask.onOpen(() => {
     console.log('[WS] connected')
     reconnectAttempts = 0
+    statusHandler?.(true)
     // 心跳：每 30s 发 ping
     heartbeatTimer = setInterval(() => {
       sendWs('ping', null)
@@ -58,6 +60,7 @@ function doConnect(token: string): void {
 
   socketTask.onClose(() => {
     console.log('[WS] closed')
+    statusHandler?.(false)
     if (heartbeatTimer) {
       clearInterval(heartbeatTimer)
       heartbeatTimer = null
@@ -83,13 +86,16 @@ function doConnect(token: string): void {
 export function connectSocket(
   token: string,
   onMessage: (msg: WsMessage) => void,
+  onStatus?: (connected: boolean) => void,
 ): void {
   // 已连接则只更新 handler，不重复建连
   if (socketTask) {
     messageHandler = onMessage
+    if (onStatus) statusHandler = onStatus
     return
   }
   messageHandler = onMessage
+  statusHandler = onStatus ?? null
   shouldReconnect = true
   reconnectAttempts = 0
   doConnect(token)

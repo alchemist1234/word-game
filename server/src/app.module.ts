@@ -9,12 +9,15 @@ import { UserEntity } from './user/user.entity'
 import { UserAuthEntity } from './user/user-auth.entity'
 import { UserProgressEntity } from './user/user-progress.entity'
 import { UserFoundWordEntity } from './user/user-found-word.entity'
+import { MatchEntity } from './match/match.entity'
+import { MatchPlayerEntity } from './match/match-player.entity'
 import { DictionaryModule } from './dictionary/dictionary.module'
 import { GridPoolModule } from './grid-pool/grid-pool.module'
 import { GameModule } from './game/game.module'
 import { AuthModule } from './auth/auth.module'
 import { LevelModule } from './level/level.module'
 import { PokedexModule } from './pokedex/pokedex.module'
+import { MatchModule } from './match/match.module'
 
 @Module({
   imports: [
@@ -32,6 +35,8 @@ import { PokedexModule } from './pokedex/pokedex.module'
         UserAuthEntity,
         UserProgressEntity,
         UserFoundWordEntity,
+        MatchEntity,
+        MatchPlayerEntity,
       ],
       synchronize: true,
     }),
@@ -43,6 +48,7 @@ import { PokedexModule } from './pokedex/pokedex.module'
     AuthModule,
     LevelModule,
     PokedexModule,
+    MatchModule,
   ],
 })
 export class AppModule {}
