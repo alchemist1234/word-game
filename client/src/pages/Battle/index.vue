@@ -4,7 +4,9 @@ import { onLoad, onUnload, onBackPress } from '@dcloudio/uni-app'
 import { useGameStore } from '../../store/game'
 import GridBoard from '../../components/GridBoard.vue'
 import type { CellPos } from '../../core/types'
-import { queueMatch, matchQueueStatus, cancelMatchQueue } from '../../api'
+import { queueMatch, matchQueueStatus, cancelMatchQueue, abandonMatch } from '../../api'
+import { sendWs } from '../../api/socket'
+import { playFail, playCombo } from '../../utils/sound'
 
 const store = useGameStore()
 
@@ -43,6 +45,9 @@ onLoad(async () => {
             mySid: res.mySid,
             opponent: res.opponent ?? { nickname: '对手', rankTier: 1 },
           })
+          // 刷新/重入场景：向房间重新声明在线，清除 30s 断线宽限定时器并重补状态
+          // （与 connectWs 重连回调互补：若 WS 在 apply 后才连上由回调补齐）
+          sendWs('match_join', { matchId: store.matchId })
         }
       }
     } catch {
@@ -114,6 +119,19 @@ const foundCells = computed(() => {
   return set
 })
 
+// 已找到词按稀有度从高到低排序（与单人闯关一致）
+const RARITY_ORDER: Record<string, number> = {
+  idiom: 0,
+  rare: 1,
+  normal: 2,
+  common: 3,
+}
+const sortedFoundWords = computed(() =>
+  [...store.foundWords].sort(
+    (a, b) => (RARITY_ORDER[a.rarity] ?? 9) - (RARITY_ORDER[b.rarity] ?? 9),
+  ),
+)
+
 // ===== 对局数据 =====
 const myScore = computed(() => store.score)
 const oppScore = computed(() => store.opponent?.score ?? 0)
@@ -142,6 +160,62 @@ watch(
   },
 )
 
+// ===== 反馈与连击（对齐单人闯关 Game 页：错词红闪 + 连击加分/倒计时） =====
+// 连击倒计时（本地 UI 显示，服务端权威判定一致性）
+const COMBO_WINDOW = 10000
+const comboCountdownMs = ref(0)
+let comboInterval: ReturnType<typeof setInterval> | null = null
+
+const comboBarWidth = computed(
+  () => `${Math.max(0, (comboCountdownMs.value / COMBO_WINDOW) * 100)}%`,
+)
+
+function startComboCountdown() {
+  comboCountdownMs.value = COMBO_WINDOW
+  if (comboInterval) clearInterval(comboInterval)
+  comboInterval = setInterval(() => {
+    comboCountdownMs.value -= 100
+    if (comboCountdownMs.value <= 0) {
+      comboCountdownMs.value = 0
+      if (comboInterval) {
+        clearInterval(comboInterval)
+        comboInterval = null
+      }
+    }
+  }, 100)
+}
+
+const failFlash = ref(false)
+let failTimer: ReturnType<typeof setTimeout> | null = null
+let feedbackTimer: ReturnType<typeof setTimeout> | null = null
+
+watch(
+  () => store.lastFeedback,
+  (fb) => {
+    if (!fb) return
+    if (fb === 'success') {
+      // 连击 >=1 时播连击音阶 + 重启倒计时进度条（与单人闯关一致）
+      if (store.combo >= 1) playCombo(store.combo)
+      startComboCountdown()
+      if (feedbackTimer) clearTimeout(feedbackTimer)
+      feedbackTimer = setTimeout(() => store.clearFeedback(), 800)
+    } else if (fb === 'fail') {
+      // 错词：背景红色闪烁 + 低音 + 轻震动
+      failFlash.value = true
+      playFail()
+      uni.vibrateShort({ type: 'light' })
+      if (failTimer) clearTimeout(failTimer)
+      failTimer = setTimeout(() => {
+        failFlash.value = false
+        store.clearFeedback()
+      }, 350)
+    } else if (fb === 'duplicate') {
+      if (feedbackTimer) clearTimeout(feedbackTimer)
+      feedbackTimer = setTimeout(() => store.clearFeedback(), 600)
+    }
+  },
+)
+
 // ===== 结算 =====
 const end = computed(() => store.matchEnd)
 const resultTitle = computed(() => {
@@ -154,6 +228,16 @@ const resultColor = computed(() => {
   if (end.value.winnerUserId === null) return 'draw'
   return end.value.won ? 'win' : 'lose'
 })
+// 对方认输/掉线判负：分数低仍获胜时的明确提示，避免误解
+const forfeitTipText = computed(() => {
+  if (!end.value?.opponentForfeit) return ''
+  return end.value.forfeitReason === 'disconnect'
+    ? '对方掉线，本局判胜'
+    : '对方认输，本局胜利'
+})
+const forfeitBadgeText = computed(() =>
+  end.value?.forfeitReason === 'disconnect' ? '掉线' : '认输',
+)
 
 function onBackHome() {
   store.resetMatch()
@@ -169,18 +253,25 @@ onUnload(() => {
   if (oppFloatTimer) clearTimeout(oppFloatTimer)
 })
 
-// 返回拦截：排队/对局中确认离开
+// 返回拦截：排队/对局中确认离开（对局中主动离开 = 判负，对方直接获胜）
 onBackPress(() => {
   const active = queuing.value || (phase.value !== 'idle' && phase.value !== 'finished')
   if (active) {
     uni.showModal({
       title: '离开对战',
-      content: '确定要离开当前对战吗？',
-      confirmText: '离开',
+      content: queuing.value
+        ? '确定要取消匹配并离开吗？'
+        : '确定要离开当前对战吗？离开即判负，对手直接获胜。',
+      confirmText: queuing.value ? '离开' : '认输离开',
       cancelText: '继续',
       success: (res) => {
         if (res.confirm) {
-          if (queuing.value) void cancelMatchQueue()
+          if (queuing.value) {
+            void cancelMatchQueue()
+          } else {
+            // 主动离开：服务端立即结束对局并判对方胜利（不管当前得分）
+            void abandonMatch().catch(() => {})
+          }
           store.resetMatch()
           uni.navigateBack()
         }
@@ -193,11 +284,14 @@ onBackPress(() => {
 
 onUnmounted(() => {
   if (countdownTimer) clearInterval(countdownTimer)
+  if (comboInterval) clearInterval(comboInterval)
+  if (failTimer) clearTimeout(failTimer)
+  if (feedbackTimer) clearTimeout(feedbackTimer)
 })
 </script>
 
 <template>
-  <view class="battle">
+  <view class="battle" :class="{ 'battle-fail': failFlash }">
     <!-- 排队中 -->
     <view v-if="queuing" class="queuing">
       <view class="queuing-title">匹配中...</view>
@@ -237,6 +331,15 @@ onUnmounted(() => {
         </view>
       </view>
 
+      <view class="combo-bar" :class="{ 'combo-idle': store.combo === 0 }">
+        <text v-if="store.combo > 0" class="combo-text">
+          连击 ×{{ store.combo }}<text class="combo-mult">（本次 +{{ store.comboBonus }}分）</text>
+        </text>
+        <view class="combo-track">
+          <view class="combo-fill" :style="{ width: comboBarWidth }" />
+        </view>
+      </view>
+
       <view class="current-word">
         <text v-if="store.currentWord" class="word-text">{{ store.currentWord }}</text>
         <text v-else class="word-placeholder">滑动连接相邻汉字</text>
@@ -255,14 +358,23 @@ onUnmounted(() => {
         />
       </view>
 
-      <view class="found-hint">
-        <text>已找到 {{ store.foundWords.length }} 个词</text>
+      <view class="found-words">
+        <text v-if="sortedFoundWords.length === 0" class="found-hint">
+          已找到的词显示在这里
+        </text>
+        <text
+          v-for="fw in sortedFoundWords"
+          :key="fw.word"
+          class="word-tag"
+          :class="'tag-' + fw.rarity"
+        >{{ fw.word }}</text>
       </view>
     </view>
 
     <!-- 结算 -->
     <view v-else-if="phase === 'finished' && end" class="result">
       <text class="result-title" :class="resultColor">{{ resultTitle }}</text>
+      <view v-if="end.opponentForfeit" class="forfeit-tip">{{ forfeitTipText }}</view>
       <view class="result-scores">
         <view class="result-side">
           <text class="result-name">我</text>
@@ -271,7 +383,10 @@ onUnmounted(() => {
         </view>
         <view class="result-vs">VS</view>
         <view class="result-side">
-          <text class="result-name">{{ oppNickname }}</text>
+          <view class="result-name-row">
+            <text class="result-name">{{ oppNickname }}</text>
+            <text v-if="end.opponentForfeit" class="forfeit-badge">{{ forfeitBadgeText }}</text>
+          </view>
           <text class="result-score">{{ end.opponent.score }} 分</text>
           <text class="result-sub">稀有 {{ end.opponent.rareCount }} · 连击峰值 {{ end.opponent.maxCombo }}</text>
         </view>
@@ -299,6 +414,10 @@ onUnmounted(() => {
   background: #f5f0e8;
   display: flex;
   flex-direction: column;
+  transition: background 0.15s;
+}
+.battle-fail {
+  background: #f8d8d8;
 }
 
 /* 排队 */
@@ -372,6 +491,40 @@ onUnmounted(() => {
 }
 .opp-float-show { opacity: 1; }
 
+.combo-bar {
+  width: 100%;
+  height: 52rpx; /* 固定高度占位：连击条显隐不影响网格布局，避免命中错位 */
+  margin-bottom: 8rpx;
+  overflow: hidden;
+}
+.combo-idle {
+  visibility: hidden; /* 无连击时内容隐藏但保留高度 */
+}
+.combo-text {
+  display: block;
+  font-size: 26rpx;
+  line-height: 34rpx; /* 固定行高，防止文本溢出被 height/overflow 裁剪 */
+  color: #d97a1e;
+  font-weight: bold;
+}
+.combo-mult {
+  font-size: 22rpx;
+  color: #d97a1e;
+}
+.combo-track {
+  height: 10rpx;
+  background: #e8e0d0;
+  border-radius: 5rpx;
+  margin-top: 6rpx;
+  overflow: hidden;
+}
+.combo-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #d97a1e, #f0a030);
+  border-radius: 5rpx;
+  transition: width 0.1s linear;
+}
+
 .current-word {
   height: 72rpx;
   display: flex;
@@ -383,11 +536,49 @@ onUnmounted(() => {
 .word-placeholder { font-size: 28rpx; color: #b0a090; }
 
 .board-wrap {
-  width: 100%;
-  aspect-ratio: 1 / 1;
-  margin: 0 auto;
+  width: 620rpx;
+  height: 620rpx;
+  align-self: center;
+  display: flex;
+  justify-content: center;
+  align-items: center;
 }
-.found-hint { text-align: center; font-size: 24rpx; color: #b0a090; padding: 12rpx 0; }
+.found-words {
+  width: 620rpx;
+  max-height: 150rpx;
+  margin-top: 16rpx;
+  align-self: center;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  overflow-y: auto;
+}
+.found-hint { font-size: 22rpx; color: #b0a090; padding: 8rpx 0; }
+.word-tag {
+  font-size: 22rpx;
+  line-height: 1.2;
+  padding: 4rpx 12rpx;
+  margin: 4rpx;
+  border: 1rpx solid;
+  border-radius: 8rpx;
+  background: #ffffff;
+}
+.tag-idiom {
+  color: #b8860b;
+  border-color: #d4a017;
+}
+.tag-rare {
+  color: #8e44ad;
+  border-color: #8e44ad;
+}
+.tag-normal {
+  color: #4a90d9;
+  border-color: #4a90d9;
+}
+.tag-common {
+  color: #6a5a4a;
+  border-color: #b0a090;
+}
 
 /* 结算 */
 .result {
@@ -402,6 +593,27 @@ onUnmounted(() => {
 .result-title.win { color: #d4a017; }
 .result-title.lose { color: #8a7a6a; }
 .result-title.draw { color: #4a90d9; }
+.forfeit-tip {
+  font-size: 26rpx;
+  color: #d94a4a;
+  background: #fdeaea;
+  border: 1rpx solid #f2c4c4;
+  border-radius: 24rpx;
+  padding: 10rpx 28rpx;
+}
+.result-name-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8rpx;
+}
+.forfeit-badge {
+  font-size: 20rpx;
+  color: #fff;
+  background: #d94a4a;
+  border-radius: 6rpx;
+  padding: 2rpx 10rpx;
+}
 .result-scores {
   width: 100%;
   display: flex;

@@ -58,6 +58,12 @@ export const useGameStore = defineStore('game', () => {
   const matchPhase = ref<'idle' | 'queuing' | 'countdown' | 'playing' | 'finished'>('idle')
   const matchEnd = ref<{
     winnerUserId: number | null
+    /** 是否有认输/断线判负 */
+    forfeit: boolean
+    /** 判负原因：主动认输 abandon / 断线超时 disconnect */
+    forfeitReason: 'abandon' | 'disconnect' | null
+    /** 对方是否判负（己方视角） */
+    opponentForfeit: boolean
     my: MatchPlayerView
     opponent: MatchPlayerView
   } | null>(null)

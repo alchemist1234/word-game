@@ -217,3 +217,10 @@ export async function cancelMatchQueue(): Promise<{ cancelled: boolean }> {
   if (!res.ok) throw new Error('取消匹配失败')
   return res.json()
 }
+
+/** 主动离开对战：服务端立即判负，对方直接获胜（与得分无关） */
+export async function abandonMatch(): Promise<{ ok: boolean }> {
+  const res = await request('/match/abandon', { method: 'POST' })
+  if (!res.ok) throw new Error('离开对战失败')
+  return res.json()
+}

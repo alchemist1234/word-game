@@ -66,10 +66,16 @@ export class GameGateway
     const data = clientData.get(client)
     clientData.delete(client)
     if (data) {
-      this.matchService.unregisterClient(data.userId)
-      // 对战中断线：通知 MatchService 启动 30s 宽限
-      this.matchService.handleDisconnect(data.userId)
-      this.logger.log(`Client disconnected: userId=${data.userId}`)
+      // 仅当还是该用户的当前连接时才注销 + 进入断线宽限；
+      // 刷新/重连场景旧连接 close 晚到时不误伤新连接（否则重连后对局仍被 30s 判负/广播丢失）
+      if (this.matchService.isCurrentClient(data.userId, client)) {
+        this.matchService.unregisterClient(data.userId, client)
+        // 对战中断线：通知 MatchService 启动 30s 宽限
+        this.matchService.handleDisconnect(data.userId)
+        this.logger.log(`Client disconnected: userId=${data.userId}`)
+      } else {
+        this.logger.log(`stale close ignored for userId=${data.userId}`)
+      }
     }
   }
 

@@ -24,4 +24,11 @@ export class MatchController {
   cancel(@Req() req: { user: { userId: number } }) {
     return this.matchService.cancelQueue(req.user.userId)
   }
+
+  /** 主动离开对战（判负，对方直接获胜，与得分无关） */
+  @Post('abandon')
+  async abandon(@Req() req: { user: { userId: number } }) {
+    await this.matchService.abandon(req.user.userId)
+    return { ok: true }
+  }
 }

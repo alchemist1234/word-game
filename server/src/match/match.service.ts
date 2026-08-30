@@ -68,9 +68,16 @@ export class MatchService implements OnModuleDestroy {
     this.userClients.set(userId, client)
   }
 
-  /** WS 连接注销（GameGateway.handleDisconnect 调用） */
-  unregisterClient(userId: number): void {
-    this.userClients.delete(userId)
+  /** 当前连接是否仍为该用户的连接（旧连接晚到的 close 不误伤新连接） */
+  isCurrentClient(userId: number, client: WebSocket): boolean {
+    return this.userClients.get(userId) === client
+  }
+
+  /** WS 连接注销（GameGateway.handleDisconnect 调用，仅当仍为当前连接时清理） */
+  unregisterClient(userId: number, client: WebSocket): void {
+    if (this.userClients.get(userId) === client) {
+      this.userClients.delete(userId)
+    }
   }
 
   /** 广播给指定用户（对战房间推送） */
@@ -180,6 +187,28 @@ export class MatchService implements OnModuleDestroy {
       return { cancelled: true }
     }
     return { cancelled: false }
+  }
+
+  /**
+   * 主动离开对战（玩家显式退出）：该玩家立即判负并从对局中移除，
+   * 对方无论得分高低直接获胜；同时清掉排队残留，保证同人不同时存在多场对局。
+   */
+  async abandon(userId: number): Promise<void> {
+    const matchId = this.playerMatch.get(userId)
+    await this.cancelQueue(userId)
+    if (!matchId) {
+      return
+    }
+    const room = this.rooms.get(matchId)
+    const player = room?.players.get(userId)
+    if (!room || room.status === 'finished' || !player) {
+      // 房间已结束/不存在：仅清理映射
+      this.playerMatch.delete(userId)
+      room?.players.delete(userId)
+      return
+    }
+    this.logger.warn(`Match ${matchId}: user ${userId} abandoned (active leave), opponent wins`)
+    await this.finishMatch(matchId, userId, 'abandon')
   }
 
   /** 配对扫描（每秒）：每队列成对取人；队列内清理超时者 */
@@ -356,6 +385,7 @@ export class MatchService implements OnModuleDestroy {
     const pb = room.players.get(bId)!
     const pipe = this.redis.pipeline()
     pipe.hgetall(`match_session:${pa.sid}`)
+    pipe.hgetall(`match_session:${pb.sid}`)
     const results = await pipe.exec()
     if (!results) return
     const readScore = (res: [Error | null, unknown] | null, fallback: number): number =>
@@ -409,8 +439,12 @@ export class MatchService implements OnModuleDestroy {
 
   // ===== 结算 =====
 
-  /** 时间到/断线超时：双方结算 → 胜负判定 → 落库 → 广播 match_end */
-  private async finishMatch(matchId: string, forfeitUserId?: number): Promise<void> {
+  /** 时间到/断线超时/主动离开：双方结算 → 胜负判定 → 落库 → 广播 match_end */
+  private async finishMatch(
+    matchId: string,
+    forfeitUserId?: number,
+    forfeitReason?: 'abandon' | 'disconnect',
+  ): Promise<void> {
     const room = this.rooms.get(matchId)
     if (!room || room.status === 'finished') return
     room.status = 'finished'
@@ -428,8 +462,8 @@ export class MatchService implements OnModuleDestroy {
     ])
 
     const winner = decideWinner(statsA, statsB)
-    // 断线判负：断线方为负，胜者为对方（GDD §4.2.2 断线 30s 超时判负）
-    const forfeitWinner =
+    // 断线/主动离开判负：负方为用户（断线方/离场方），胜者为对方，与得分无关（GDD §4.2.2）
+    const effectiveWinner =
       forfeitUserId === undefined
         ? winner
         : forfeitUserId === aId
@@ -438,7 +472,7 @@ export class MatchService implements OnModuleDestroy {
             ? 1
             : winner
     const winnerUserId =
-      forfeitWinner === 0 ? null : forfeitWinner === 1 ? aId : bId
+      effectiveWinner === 0 ? null : effectiveWinner === 1 ? aId : bId
 
     // 落库
     const endedAt = new Date()
@@ -450,8 +484,8 @@ export class MatchService implements OnModuleDestroy {
         endedAt,
       },
     )
-    const rankA = winner === 2 ? 2 : 1
-    const rankB = winner === 1 ? 2 : 1
+    const rankA = effectiveWinner === 2 ? 2 : 1
+    const rankB = effectiveWinner === 1 ? 2 : 1
     await this.matchPlayerRepo.save([
       this.matchPlayerRepo.create({
         matchId, userId: aId, score: statsA.score,
@@ -469,14 +503,20 @@ export class MatchService implements OnModuleDestroy {
     const endA = {
       matchId,
       winnerUserId,
-      won: winner === 1,
+      won: effectiveWinner === 1,
+      forfeit: forfeitUserId !== undefined,
+      forfeitReason: forfeitUserId !== undefined ? forfeitReason : null,
+      opponentForfeit: forfeitUserId === bId,
       my: statsA,
       opponent: statsB,
     }
     const endB = {
       matchId,
       winnerUserId,
-      won: winner === 2,
+      won: effectiveWinner === 2,
+      forfeit: forfeitUserId !== undefined,
+      forfeitReason: forfeitUserId !== undefined ? forfeitReason : null,
+      opponentForfeit: forfeitUserId === aId,
       my: statsB,
       opponent: statsA,
     }
@@ -525,7 +565,7 @@ export class MatchService implements OnModuleDestroy {
       const p = r?.players.get(userId)
       if (r && p && !p.clientConnected && r.status !== 'finished') {
         this.logger.warn(`Match ${matchId}: user ${userId} disconnected > ${DISCONNECT_GRACE_MS}ms, forfeit`)
-                void this.finishMatch(matchId, userId)
+                void this.finishMatch(matchId, userId, 'disconnect')
       }
     }, DISCONNECT_GRACE_MS)
   }

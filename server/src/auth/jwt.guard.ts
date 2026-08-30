@@ -23,7 +23,9 @@ export class JwtAuthGuard implements CanActivate {
     const token = authHeader.slice(7)
     try {
       const payload = this.jwtService.verify<{ userId: number; platform: string }>(token)
-      req.user = { userId: payload.userId, platform: payload.platform }
+      // bigint 列经 JWT 后 userId 是字符串：统一转数字（对齐 GameGateway Number() 处理，
+      // 否则 Map 键类型不一致导致"同一人不在同一场对局"的判断失效，刷新后重复匹配出新对局）
+      req.user = { userId: Number(payload.userId), platform: payload.platform }
       return true
     } catch {
       throw new UnauthorizedException('token 无效或已过期')
