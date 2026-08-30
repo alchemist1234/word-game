@@ -11,6 +11,11 @@ import { UserProgressEntity } from './user/user-progress.entity'
 import { UserFoundWordEntity } from './user/user-found-word.entity'
 import { MatchEntity } from './match/match.entity'
 import { MatchPlayerEntity } from './match/match-player.entity'
+import { ChallengeEntity } from './challenge/challenge.entity'
+import { ChallengeAttemptEntity } from './challenge/challenge-attempt.entity'
+import { DailyChallengeEntity } from './daily/daily-challenge.entity'
+import { DailyAttemptEntity } from './daily/daily-attempt.entity'
+import { LeaderboardSnapshotEntity } from './leaderboard/leaderboard-snapshot.entity'
 import { DictionaryModule } from './dictionary/dictionary.module'
 import { GridPoolModule } from './grid-pool/grid-pool.module'
 import { GameModule } from './game/game.module'
@@ -18,6 +23,9 @@ import { AuthModule } from './auth/auth.module'
 import { LevelModule } from './level/level.module'
 import { PokedexModule } from './pokedex/pokedex.module'
 import { MatchModule } from './match/match.module'
+import { ChallengeModule } from './challenge/challenge.module'
+import { DailyModule } from './daily/daily.module'
+import { LeaderboardModule } from './leaderboard/leaderboard.module'
 
 @Module({
   imports: [
@@ -37,6 +45,11 @@ import { MatchModule } from './match/match.module'
         UserFoundWordEntity,
         MatchEntity,
         MatchPlayerEntity,
+        ChallengeEntity,
+        ChallengeAttemptEntity,
+        DailyChallengeEntity,
+        DailyAttemptEntity,
+        LeaderboardSnapshotEntity,
       ],
       synchronize: true,
     }),
@@ -49,6 +62,9 @@ import { MatchModule } from './match/match.module'
     LevelModule,
     PokedexModule,
     MatchModule,
+    ChallengeModule,
+    DailyModule,
+    LeaderboardModule,
   ],
 })
 export class AppModule {}

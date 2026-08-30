@@ -224,3 +224,108 @@ export async function abandonMatch(): Promise<{ ok: boolean }> {
   if (!res.ok) throw new Error('离开对战失败')
   return res.json()
 }
+
+// ===== Challenge API（迭代7：好友挑战） =====
+export interface ChallengeDetailResponse {
+  id: string
+  gridSeed: string
+  duration: number
+  challenger: { userId: number; nickname: string; score: number }
+  stats: { attemptCount: number; bestScore: number; bestNickname: string | null }
+  myBest: number | null
+  beatChallenger: boolean
+}
+export interface ChallengeStartResponse {
+  matchSessionId: string
+  grid: string[][]
+  size: number
+  duration: number
+  challenger: { nickname: string; score: number }
+}
+export interface ChallengeSubmitResponse {
+  saved: boolean
+  beat: boolean
+  my: { score: number; maxCombo: number; foundCount: number; foundWords: Array<{ word: string; score: number; rarity: string }> }
+  challenger: { nickname: string; score: number }
+  rank: number
+}
+export async function createChallenge(matchSessionId: string): Promise<{ challengeId: string }> {
+  const res = await request('/challenge/create', { method: 'POST', body: JSON.stringify({ matchSessionId }) })
+  if (!res.ok) throw new Error('创建挑战失败')
+  return res.json()
+}
+export async function fetchChallengeDetail(id: string): Promise<ChallengeDetailResponse> {
+  const res = await request(`/challenge/${id}`)
+  if (!res.ok) throw new Error('获取挑战失败')
+  return res.json()
+}
+export async function startChallengeRequest(id: string): Promise<ChallengeStartResponse> {
+  const res = await request(`/challenge/${id}/start`, { method: 'POST' })
+  if (!res.ok) throw new Error('开始挑战失败')
+  return res.json()
+}
+export async function submitChallengeRequest(id: string, matchSessionId: string): Promise<ChallengeSubmitResponse> {
+  const res = await request(`/challenge/${id}/submit`, { method: 'POST', body: JSON.stringify({ matchSessionId }) })
+  if (!res.ok) throw new Error('提交挑战失败')
+  return res.json()
+}
+export async function fetchMyChallenges(): Promise<{ challenges: Array<{ challengeId: string; createdAt: string; challengerScore: number; attemptCount: number; bestScore: number; bestNickname: string | null; beaten: boolean }> }> {
+  const res = await request('/challenge/mine')
+  if (!res.ok) throw new Error('获取我的挑战失败')
+  return res.json()
+}
+
+// ===== Daily API（迭代7：每日挑战） =====
+export interface DailyInfoResponse {
+  date: string
+  size: number
+  duration: number
+  attemptsUsed: number
+  attemptsLeft: number
+  myBest: number | null
+}
+export interface DailyStartResponse {
+  matchSessionId: string
+  grid: string[][]
+  size: number
+  duration: number
+  date: string
+  attemptsLeft: number
+}
+export interface DailySubmitResponse {
+  saved: boolean
+  score: number
+  attemptsLeft: number
+  myBest: number
+  maxCombo: number
+  foundCount: number
+  foundWords: Array<{ word: string; score: number; rarity: string }>
+}
+export async function fetchDailyInfo(): Promise<DailyInfoResponse> {
+  const res = await request('/daily')
+  if (!res.ok) throw new Error('获取每日挑战失败')
+  return res.json()
+}
+export async function startDailyRequest(): Promise<DailyStartResponse> {
+  const res = await request('/daily/start', { method: 'POST' })
+  if (!res.ok) throw new Error('开始每日挑战失败')
+  return res.json()
+}
+export async function submitDailyRequest(matchSessionId: string): Promise<DailySubmitResponse> {
+  const res = await request('/daily/submit', { method: 'POST', body: JSON.stringify({ matchSessionId }) })
+  if (!res.ok) throw new Error('提交每日挑战失败')
+  return res.json()
+}
+
+// ===== Leaderboard API（迭代7：排行榜） =====
+export interface LeaderboardResponse {
+  type: string
+  period: string
+  mine: { userId: number; nickname: string; score: number; rank: number } | null
+  list: Array<{ userId: number; nickname: string; score: number }>
+}
+export async function fetchLeaderboard(type: string): Promise<LeaderboardResponse> {
+  const res = await request(`/leaderboard?type=${type}`)
+  if (!res.ok) throw new Error('获取排行榜失败')
+  return res.json()
+}

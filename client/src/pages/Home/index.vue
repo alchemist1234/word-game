@@ -2,7 +2,7 @@
 import { clearToken } from '../../api'
 import { disconnectSocket } from '../../api/socket'
 
-/** 大厅首页（GDD §6.1 P0）：入口聚合，对齐迭代6详细设计 §8.1 */
+/** 大厅首页（GDD §6.1 P0 + 迭代7：每日/排行榜入口） */
 function onChapters() {
   uni.navigateTo({ url: '/pages/Chapters/index' })
 }
@@ -11,6 +11,15 @@ function onBattle() {
 }
 function onPokedex() {
   uni.navigateTo({ url: '/pages/Pokedex/index' })
+}
+function onDaily() {
+  uni.navigateTo({ url: '/pages/Daily/index' })
+}
+function onLeaderboard() {
+  uni.navigateTo({ url: '/pages/Leaderboard/index' })
+}
+function onChallengeRecords() {
+  uni.navigateTo({ url: '/pages/ChallengeRecords/index' })
 }
 function onLogout() {
   disconnectSocket()
@@ -25,6 +34,11 @@ function onLogout() {
     <view class="subtitle">连线组词 · 实时竞技</view>
 
     <view class="menu">
+      <view class="menu-item daily-item" @tap="onDaily">
+        <text class="menu-icon daily">今</text>
+        <text class="menu-label">每日挑战</text>
+        <text class="menu-desc">今日统一网格 · 3次机会</text>
+      </view>
       <view class="menu-item" @tap="onChapters">
         <text class="menu-icon">章</text>
         <text class="menu-label">单人闯关</text>
@@ -39,6 +53,16 @@ function onLogout() {
         <text class="menu-icon pokedex">鉴</text>
         <text class="menu-label">词库图鉴</text>
         <text class="menu-desc">收集你找到的词</text>
+      </view>
+      <view class="menu-item" @tap="onLeaderboard">
+        <text class="menu-icon leaderboard">榜</text>
+        <text class="menu-label">排行榜</text>
+        <text class="menu-desc">每日 / 赛季 / 总榜</text>
+      </view>
+      <view class="menu-item" @tap="onChallengeRecords">
+        <text class="menu-icon challenge">邀</text>
+        <text class="menu-label">我的挑战</text>
+        <text class="menu-desc">好友挑战记录</text>
       </view>
     </view>
 
@@ -97,6 +121,10 @@ function onLogout() {
 }
 .menu-icon.battle { background: #d94a4a; }
 .menu-icon.pokedex { background: #d4a017; }
+.menu-icon.daily { background: #4caf50; }
+.menu-icon.leaderboard { background: #8e44ad; }
+.menu-icon.challenge { background: #ff7043; }
+.daily-item { border-color: #a5d6a7; background: #f1f8e9; }
 .menu-label {
   font-size: 34rpx;
   font-weight: bold;

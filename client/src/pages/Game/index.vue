@@ -8,17 +8,24 @@ import { playSuccess, playIdiom, playFail, playCombo } from '../../utils/sound'
 
 const store = useGameStore()
 
-// 进入页面确保对局进行中
+// 进入页面确保对局进行中（支持 闯关/每日/好友 参数）
 onShow(() => {
   if (store.phase !== 'playing') {
-    // 闯关模式：从路由参数取 levelId
     const pages = getCurrentPages()
     const currentPage = pages[pages.length - 1] as
-      | { options?: { levelId?: string } }
+      | { options?: { levelId?: string; challengeId?: string; daily?: string } }
       | undefined
-    const levelId = currentPage?.options?.levelId
-    if (levelId) {
-      store.startLevel(levelId)
+    const opts = currentPage?.options
+    if (opts?.levelId) {
+      store.startLevel(opts.levelId)
+    } else if (opts?.challengeId || opts?.daily) {
+      // 每日/好友由 store.startDaily/startChallenge 预置过状态，直接兜底自由开局会覆盖；这里仅保自由兜底
+      // 正常流程：Daily/ChallengeEntry 页已调 store.start* 并 redirect，此处不再重开
+      if (store.dailyMode || store.challengeMode) {
+        // 已在对局中，无需操作（redirectTo 已带状态）
+      } else {
+        store.startGame()
+      }
     } else {
       store.startGame()
     }
@@ -181,6 +188,12 @@ watch(
 
 <template>
   <view class="game" :class="{ 'game-fail': failFlash }">
+    <view v-if="store.dailyMode" class="mode-banner daily-banner">
+      <text>每日挑战 · {{ store.dailyDate }}</text>
+    </view>
+    <view v-if="store.challengeMode && store.challengeChallenger" class="mode-banner challenge-banner">
+      <text>挑战 {{ store.challengeChallenger.nickname }} 的 {{ store.challengeChallenger.score }} 分</text>
+    </view>
     <view class="topbar">
       <text class="timer" :class="{ 'timer-low': isLowTime }">{{ timeText }}</text>
       <text v-if="store.isBossLevel" class="boss-label">Boss</text>
@@ -246,6 +259,17 @@ watch(
 .game-fail {
   background: #f8d8d8;
 }
+.mode-banner {
+  width: 620rpx;
+  padding: 12rpx 16rpx;
+  border-radius: 8rpx;
+  text-align: center;
+  font-size: 24rpx;
+  font-weight: bold;
+  margin-bottom: 12rpx;
+}
+.daily-banner { background: #e8f5e9; color: #2e7d32; border: 1rpx solid #a5d6a7; }
+.challenge-banner { background: #fff3e0; color: #e65100; border: 1rpx solid #ffcc80; }
 .topbar {
   width: 620rpx;
   display: flex;

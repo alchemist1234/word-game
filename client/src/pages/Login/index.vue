@@ -35,7 +35,13 @@ async function onLogin() {
     // 建立 WebSocket 连接（划词判定走长连接）
     disconnectSocket()
     useGameStore().connectWs()
-    uni.reLaunch({ url: '/pages/Home/index' })
+    const pending = uni.getStorageSync('pendingChallenge')
+    if (pending) {
+      uni.removeStorageSync('pendingChallenge')
+      uni.reLaunch({ url: `/pages/ChallengeEntry/index?challenge=${pending}` })
+    } else {
+      uni.reLaunch({ url: '/pages/Home/index' })
+    }
   } catch (e) {
     errorMsg.value = '登录失败，请检查验证码'
   } finally {
@@ -43,10 +49,16 @@ async function onLogin() {
   }
 }
 
-// 已登录则跳章节
+// 已登录则跳章节（带 pendingChallenge 回跳）
 if (getToken()) {
   useGameStore().connectWs()
-  uni.reLaunch({ url: '/pages/Home/index' })
+  const pending = uni.getStorageSync('pendingChallenge')
+  if (pending) {
+    uni.removeStorageSync('pendingChallenge')
+    uni.reLaunch({ url: `/pages/ChallengeEntry/index?challenge=${pending}` })
+  } else {
+    uni.reLaunch({ url: '/pages/Home/index' })
+  }
 }
 </script>
 

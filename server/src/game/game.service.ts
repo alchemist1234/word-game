@@ -15,6 +15,15 @@ const SESSION_TTL = 600
 const COMBO_WINDOW_MS = 10000
 const MAX_COMBO = 10
 
+export interface RawGrid {
+  id: string
+  grid: string[][]
+  targetWords: string[]
+  potentialWords: string[]
+  potentialCount: number
+  size: number
+}
+
 @Injectable()
 export class GameService {
   constructor(
@@ -43,12 +52,9 @@ export class GameService {
     return this.createSessionFromGrid(gridEntity, userId, duration)
   }
 
-  /**
-   * 用指定网格创建对局会话（对战模式复用：双方同一 gridEntity，保证同网格）
-   * 迭代6详细设计 §2.1：对战每玩家独立 match_session，hset 附加 matchId 标记
-   */
-  async createSessionFromGrid(
-    gridEntity: GridPoolEntity,
+  /** 任意原始网格建会话（迭代7：好友/每日复用） */
+  async createSessionFromRaw(
+    raw: RawGrid,
     userId: number,
     duration = 90,
     matchId?: string,
@@ -60,8 +66,7 @@ export class GameService {
     gridSeed: string
   }> {
     const matchSessionId = uuidv4()
-    // 预存潜在词池 + rarity/length（submitWord/endGame 用内存 Map 判定，不查 PG）
-    const potentialWithRarity = gridEntity.potentialWords.map((w) => {
+    const potentialWithRarity = raw.potentialWords.map((w) => {
       const dict = this.dictionaryService.findByWord(w)
       return {
         word: w,
@@ -70,11 +75,11 @@ export class GameService {
       }
     })
     const sessionFields: Record<string, string> = {
-      gridUuid: gridEntity.id,
-      grid: JSON.stringify(gridEntity.grid),
-      targetWords: JSON.stringify(gridEntity.targetWords),
-      potentialCount: gridEntity.potentialCount.toString(),
-      potentialWords: JSON.stringify(gridEntity.potentialWords),
+      gridUuid: raw.id,
+      grid: JSON.stringify(raw.grid),
+      targetWords: JSON.stringify(raw.targetWords),
+      potentialCount: raw.potentialCount.toString(),
+      potentialWords: JSON.stringify(raw.potentialWords),
       potentialWordsWithRarity: JSON.stringify(potentialWithRarity),
       score: '0',
       comboScore: '0',
@@ -92,11 +97,42 @@ export class GameService {
     await this.redis.expire(`match_session:${matchSessionId}`, SESSION_TTL)
     return {
       matchSessionId,
-      grid: gridEntity.grid,
-      size: gridEntity.size,
+      grid: raw.grid,
+      size: raw.size,
       duration,
-      gridSeed: gridEntity.id,
+      gridSeed: raw.id,
     }
+  }
+
+  /**
+   * 用指定网格创建对局会话（对战模式复用：双方同一 gridEntity，保证同网格）
+   * 迭代6详细设计 §2.1：对战每玩家独立 match_session，hset 附加 matchId 标记
+   */
+  async createSessionFromGrid(
+    gridEntity: GridPoolEntity,
+    userId: number,
+    duration = 90,
+    matchId?: string,
+  ): Promise<{
+    matchSessionId: string
+    grid: string[][]
+    size: number
+    duration: number
+    gridSeed: string
+  }> {
+    return this.createSessionFromRaw(
+      {
+        id: gridEntity.id,
+        grid: gridEntity.grid,
+        targetWords: gridEntity.targetWords,
+        potentialWords: gridEntity.potentialWords,
+        potentialCount: gridEntity.potentialCount,
+        size: gridEntity.size,
+      },
+      userId,
+      duration,
+      matchId,
+    )
   }
 
   /** 提词校验 + 计分 */
@@ -268,6 +304,20 @@ export class GameService {
     const userId = parseInt(session.userId || '0', 10)
     if (userId > 0) {
       await this.upsertFoundWords(userId, foundWords)
+    }
+
+    // 总榜：历史最高单局分（迭代7 §4.1，集中更新，失败不影响结算）
+    if (userId > 0) {
+      try {
+        const scoreForLb = parseInt(session.score || '0', 10)
+        const cur = await this.redis.zscore('lb:all', userId.toString())
+        const curNum = cur ? parseInt(cur, 10) : null
+        if (curNum === null || scoreForLb > curNum) {
+          await this.redis.zadd('lb:all', scoreForLb.toString(), userId.toString())
+        }
+      } catch {
+        // 忽略排行榜更新失败
+      }
     }
 
     // 未找到的词（网格潜在词 - 已找到），按稀有度从高到低

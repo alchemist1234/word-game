@@ -6,9 +6,13 @@ import {
   endGame as endGameApi,
   startLevel as startLevelApi,
   submitLevel as submitLevelApi,
+  createChallenge as createChallengeApi,
+  submitDailyRequest,
+  submitChallengeRequest,
+  submitWord as submitWordHttp,
   type SubmitWordResponse,
 } from '../api'
-import { connectSocket, sendWs, type WsMessage } from '../api/socket'
+import { connectSocket, sendWs, isWsConnected, type WsMessage } from '../api/socket'
 
 const GAME_DURATION = 90
 
@@ -44,6 +48,21 @@ export const useGameStore = defineStore('game', () => {
   const perfectBonus = ref(0)
   const unfoundWords = ref<Array<{ word: string; rarity: string }>>([])
   const isBossLevel = ref(false)
+  // 每日/好友挑战模式（迭代7）
+  const dailyMode = ref(false)
+  const dailyDate = ref('')
+  const dailyAttemptsLeft = ref(0)
+  const dailyBest = ref<number | null>(null)
+  const challengeMode = ref(false)
+  const challengeId = ref('')
+  const challengeChallenger = ref<{ nickname: string; score: number } | null>(null)
+  const challengeResult = ref<{
+    beat: boolean
+    myScore: number
+    challengerScore: number
+    challengerNickname: string
+    rank: number
+  } | null>(null)
   // 对战模式（迭代6：实时 1v1）
   const matchMode = ref(false)
   const matchId = ref('')
@@ -137,10 +156,25 @@ export const useGameStore = defineStore('game', () => {
     isBossLevel.value = false
   }
 
+  function clearDailyChallengeState() {
+    dailyMode.value = false
+    dailyDate.value = ''
+    dailyAttemptsLeft.value = 0
+    dailyBest.value = null
+  }
+  function clearChallengeStateInternal() {
+    challengeMode.value = false
+    challengeId.value = ''
+    challengeChallenger.value = null
+    challengeResult.value = null
+  }
+
   /** 自由模式：开始新一局 */
   async function startGame() {
     clearTimer()
     resetState()
+    clearDailyChallengeState()
+    clearChallengeStateInternal()
     levelMode.value = false
     levelId.value = ''
     objective.value = null
@@ -165,6 +199,8 @@ export const useGameStore = defineStore('game', () => {
   async function startLevel(id: string) {
     clearTimer()
     resetState()
+    clearDailyChallengeState()
+    clearChallengeStateInternal()
     levelMode.value = true
     levelId.value = id
     canNext.value = false
@@ -189,6 +225,48 @@ export const useGameStore = defineStore('game', () => {
     }
   }
 
+  /** 每日挑战：用服务端返回直接开局（迭代7） */
+  function startDaily(res: { matchSessionId: string; grid: string[][]; duration: number; date: string }) {
+    clearTimer()
+    resetState()
+    clearChallengeStateInternal()
+    levelMode.value = false
+    levelId.value = ''
+    objective.value = null
+    dailyMode.value = true
+    dailyDate.value = res.date
+    matchSessionId.value = res.matchSessionId
+    grid.value = res.grid
+    timeLeft.value = res.duration
+    phase.value = 'playing'
+    timerId = setInterval(tick, 1000)
+  }
+
+  /** 好友挑战：用服务端返回直接开局（迭代7） */
+  function startChallenge(res: { matchSessionId: string; grid: string[][]; duration: number; challengeId: string; challenger: { nickname: string; score: number } }) {
+    clearTimer()
+    resetState()
+    clearDailyChallengeState()
+    levelMode.value = false
+    levelId.value = ''
+    objective.value = null
+    challengeMode.value = true
+    challengeId.value = res.challengeId
+    challengeChallenger.value = res.challenger
+    matchSessionId.value = res.matchSessionId
+    grid.value = res.grid
+    timeLeft.value = res.duration
+    phase.value = 'playing'
+    timerId = setInterval(tick, 1000)
+  }
+
+  async function createChallenge(): Promise<string> {
+    const sid = matchSessionId.value
+    if (!sid) throw new Error('无会话')
+    const res = await createChallengeApi(sid)
+    return res.challengeId
+  }
+
   function tick() {
     if (phase.value !== 'playing') return
     timeLeft.value--
@@ -211,8 +289,8 @@ export const useGameStore = defineStore('game', () => {
     selectedCells.value = []
   }
 
-  /** WebSocket 提词：发送后不阻塞，结果通过 handleWordResult 异步回调 */
-  function submitSelection() {
+  /** WebSocket 提词：优先 WS，WS 未连接/超时回退 HTTP，保证每日/好友等同体验 */
+  async function submitSelection() {
     if (phase.value !== 'playing') return
     const cells = [...selectedCells.value]
     const word = currentWord.value
@@ -222,12 +300,60 @@ export const useGameStore = defineStore('game', () => {
 
     // 记录待匹配的词（WebSocket 消息有序，FIFO 匹配结果）
     pendingWords.value.push({ word, cells })
-    // cells 压缩为 [[r,c],...] 省字节
-    sendWs('submit_word', {
-      sid: matchSessionId.value,
-      word,
-      cells: cells.map((c) => [c.row, c.col]),
-    })
+    if (isWsConnected()) {
+      // cells 压缩为 [[r,c],...] 省字节
+      sendWs('submit_word', {
+        sid: matchSessionId.value,
+        word,
+        cells: cells.map((c) => [c.row, c.col]),
+      })
+      // 超时兜底：1.5s 内未收到 word_result 则回退 HTTP，保证有反馈
+      const fallbackWord = word
+      const fallbackCells = cells
+      const fallbackSid = matchSessionId.value
+      setTimeout(async () => {
+        const idx = pendingWords.value.findIndex((p) => p.word === fallbackWord)
+        if (idx === -1) return
+        pendingWords.value.splice(idx, 1)
+        try {
+          const res = await submitWordHttp(fallbackSid, fallbackWord, fallbackCells)
+          if (res.valid && res.score !== undefined) {
+            foundWords.value.push({
+              word: fallbackWord,
+              cells: fallbackCells,
+              score: res.score,
+              rarity: (res.rarity ?? 'common') as Rarity,
+            })
+            score.value = res.totalScore ?? score.value + res.score
+            combo.value = res.combo ?? 0
+            comboBonus.value = res.comboBonus ?? 0
+            maxCombo.value = Math.max(maxCombo.value, combo.value)
+            lastFeedback.value = 'success'
+            lastFloatScore.value = res.score
+            lastFoundRarity.value = res.rarity ?? null
+            if (res.perfect) {
+              perfect.value = true
+              perfectBonus.value = res.perfectBonus ?? 0
+              void endGame()
+            }
+          } else if (res.reason === 'duplicate') {
+            lastFeedback.value = 'duplicate'
+          } else {
+            lastFeedback.value = 'fail'
+          }
+        } catch {
+          lastFeedback.value = 'fail'
+        }
+      }, 1500)
+    } else {
+      try {
+        const res = await submitWordHttp(matchSessionId.value, word, cells)
+        handleWordResult(res)
+      } catch {
+        pendingWords.value.shift()
+        lastFeedback.value = 'fail'
+      }
+    }
   }
 
   /** 处理 WebSocket 返回的提词结果 */
@@ -351,7 +477,7 @@ export const useGameStore = defineStore('game', () => {
     }
   }
 
-  /** 结束对局：闯关模式调 submitLevel（含星级），自由模式调 endGame */
+  /** 结束对局：闯关/每日/好友/自由 分流（迭代7） */
   async function endGame() {
     clearTimer()
     phase.value = 'finished'
@@ -374,6 +500,36 @@ export const useGameStore = defineStore('game', () => {
           score: f.score,
           rarity: f.rarity as Rarity,
         }))
+      } else if (dailyMode.value) {
+        const res = await submitDailyRequest(matchSessionId.value)
+        score.value = res.score
+        maxCombo.value = res.maxCombo
+        potentialCount.value = 0
+        dailyAttemptsLeft.value = res.attemptsLeft
+        dailyBest.value = res.myBest
+        foundWords.value = res.foundWords.map((f) => ({
+          word: f.word,
+          cells: [],
+          score: f.score,
+          rarity: f.rarity as Rarity,
+        }))
+      } else if (challengeMode.value && challengeId.value) {
+        const res = await submitChallengeRequest(challengeId.value, matchSessionId.value)
+        score.value = res.my.score
+        maxCombo.value = res.my.maxCombo
+        foundWords.value = res.my.foundWords.map((f) => ({
+          word: f.word,
+          cells: [],
+          score: f.score,
+          rarity: f.rarity as Rarity,
+        }))
+        challengeResult.value = {
+          beat: res.beat,
+          myScore: res.my.score,
+          challengerScore: res.challenger.score,
+          challengerNickname: res.challenger.nickname,
+          rank: res.rank,
+        }
       } else {
         const res = await endGameApi(matchSessionId.value)
         score.value = res.score
@@ -402,6 +558,8 @@ export const useGameStore = defineStore('game', () => {
     grid.value = []
     resetState()
     clearMatchState()
+    clearDailyChallengeState()
+    clearChallengeStateInternal()
     levelMode.value = false
     levelId.value = ''
     objective.value = null
@@ -420,6 +578,8 @@ export const useGameStore = defineStore('game', () => {
       grid.value = []
       resetState()
       clearMatchState()
+      clearDailyChallengeState()
+      clearChallengeStateInternal()
       levelMode.value = false
       levelId.value = ''
       objective.value = null
@@ -487,6 +647,14 @@ export const useGameStore = defineStore('game', () => {
     perfectBonus,
     unfoundWords,
     isBossLevel,
+    dailyMode,
+    dailyDate,
+    dailyAttemptsLeft,
+    dailyBest,
+    challengeMode,
+    challengeId,
+    challengeChallenger,
+    challengeResult,
     matchMode,
     matchId,
     mySid,
@@ -499,6 +667,9 @@ export const useGameStore = defineStore('game', () => {
     currentWord,
     startGame,
     startLevel,
+    startDaily,
+    startChallenge,
+    createChallenge,
     tick,
     selectCell,
     retreat,

@@ -49,6 +49,10 @@ export class GridPoolService implements OnModuleInit {
     return grid
   }
 
+  async findById(id: string): Promise<GridPoolEntity | null> {
+    return this.repo.findOne({ where: { id } })
+  }
+
   /** 定时补充（每 10 分钟） */
   @Cron('*/10 * * * *')
   async cronReplenish(): Promise<void> {

@@ -27,6 +27,22 @@
     {
       "path": "pages/Pokedex/index",
       "style": { "navigationBarTitleText": "词库图鉴" }
+    },
+    {
+      "path": "pages/Daily/index",
+      "style": { "navigationBarTitleText": "每日挑战" }
+    },
+    {
+      "path": "pages/ChallengeEntry/index",
+      "style": { "navigationBarTitleText": "好友挑战" }
+    },
+    {
+      "path": "pages/Leaderboard/index",
+      "style": { "navigationBarTitleText": "排行榜" }
+    },
+    {
+      "path": "pages/ChallengeRecords/index",
+      "style": { "navigationBarTitleText": "我的挑战" }
     }
   ],
   "globalStyle": {

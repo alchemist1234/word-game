@@ -1,8 +1,60 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useGameStore } from '../../store/game'
 
 const store = useGameStore()
+const sharing = ref(false)
+const shareLink = ref('')
+const showShareCard = ref(false)
+
+const canShareChallenge = computed(() => !store.levelMode && !store.matchMode && store.phase === 'finished')
+const dailyInfoText = computed(() => {
+  if (!store.dailyMode) return ''
+  return `今日最佳 ${store.dailyBest ?? store.score} · 剩余 ${store.dailyAttemptsLeft} 次`
+})
+const challengeInfoText = computed(() => {
+  if (!store.challengeMode || !store.challengeResult) return ''
+  const r = store.challengeResult
+  return r.beat ? `挑战成功！击败 ${r.challengerNickname} 的 ${r.challengerScore} 分` : `惜败，对手 ${r.challengerNickname} 得分 ${r.challengerScore}`
+})
+const resultTitle = computed(() => {
+  if (store.levelMode) return store.levelTitle
+  if (store.dailyMode) return '每日挑战完成'
+  if (store.challengeMode && store.challengeResult) return store.challengeResult.beat ? '挑战成功' : '挑战结束'
+  return '本局结束'
+})
+
+async function onShareChallenge() {
+  if (sharing.value) return
+  sharing.value = true
+  try {
+    const challengeId = await store.createChallenge()
+    const origin = typeof location !== 'undefined' ? location.origin : ''
+    const link = origin ? `${origin}/#/pages/ChallengeEntry/index?challenge=${challengeId}` : challengeId
+    shareLink.value = link
+    showShareCard.value = true
+    // 复制
+    uni.setClipboardData({
+      data: link,
+      success: () => uni.showToast({ title: '链接已复制，发给好友吧', icon: 'success' }),
+    })
+  } catch (e) {
+    uni.showToast({ title: (e as Error).message || '发起挑战失败', icon: 'none' })
+  } finally {
+    sharing.value = false
+  }
+}
+
+function onCopyLink() {
+  if (!shareLink.value) return
+  uni.setClipboardData({
+    data: shareLink.value,
+    success: () => uni.showToast({ title: '链接已复制', icon: 'success' }),
+  })
+}
+function closeShare() {
+  showShareCard.value = false
+}
 
 // 找到的词按分值降序
 const sortedWords = computed(() =>
@@ -24,6 +76,10 @@ function playAgain() {
   if (store.levelMode && store.levelId) {
     store.startLevel(store.levelId)
     uni.redirectTo({ url: `/pages/Game/index?levelId=${store.levelId}` })
+  } else if (store.dailyMode) {
+    uni.redirectTo({ url: '/pages/Daily/index' })
+  } else if (store.challengeMode && store.challengeId) {
+    uni.redirectTo({ url: `/pages/ChallengeEntry/index?challenge=${store.challengeId}` })
   } else {
     store.startGame()
     uni.redirectTo({ url: '/pages/Game/index' })
@@ -39,17 +95,27 @@ function goNextLevel() {
 
 function goHome() {
   store.restart()
-  uni.reLaunch({ url: '/pages/Chapters/index' })
+  uni.reLaunch({ url: '/pages/Home/index' })
+}
+function goDaily() {
+  store.restart()
+  uni.redirectTo({ url: '/pages/Daily/index' })
 }
 </script>
 
 <template>
   <view class="result">
-    <text class="title">{{ store.levelMode ? store.levelTitle : '本局结束' }}</text>
+    <text class="title">{{ resultTitle }}</text>
     <view v-if="store.levelMode" class="stars-display">
       <text :class="store.lastStars >= 1 ? 'star-active' : 'star-inactive'">★</text>
       <text :class="store.lastStars >= 2 ? 'star-active' : 'star-inactive'">★</text>
       <text :class="store.lastStars >= 3 ? 'star-active' : 'star-inactive'">★</text>
+    </view>
+    <view v-if="store.dailyMode" class="challenge-banner">
+      <text>{{ dailyInfoText }}</text>
+    </view>
+    <view v-if="store.challengeMode && store.challengeResult" class="challenge-banner" :class="{ beat: store.challengeResult.beat }">
+      <text>{{ challengeInfoText }} · 排名 {{ store.challengeResult.rank }}</text>
     </view>
     <view class="score-wrap">
       <text class="total-score">{{ store.score }}</text>
@@ -107,10 +173,24 @@ function goHome() {
       </scroll-view>
     </view>
 
+    <view v-if="canShareChallenge" class="share-section">
+      <button class="btn-share" :disabled="sharing" @tap="onShareChallenge">{{ sharing ? '生成中...' : '发起好友挑战' }}</button>
+      <text class="share-hint">生成同网格挑战，分享给好友</text>
+    </view>
+    <view v-if="showShareCard" class="share-card">
+      <text class="share-title">挑战已生成</text>
+      <text class="share-link">{{ shareLink }}</text>
+      <view class="share-actions">
+        <button class="btn-small" @tap="onCopyLink">复制链接</button>
+        <button class="btn-small ghost" @tap="closeShare">关闭</button>
+      </view>
+    </view>
+
     <view class="actions">
       <button v-if="store.canNext && store.nextLevelId" class="btn-next" @tap="goNextLevel">下一关</button>
-      <button class="btn-primary" @tap="playAgain">再来一局</button>
-      <button class="btn-secondary" @tap="goHome">返回章节</button>
+      <button v-if="store.dailyMode" class="btn-primary" @tap="goDaily">返回每日</button>
+      <button v-else class="btn-primary" @tap="playAgain">再来一局</button>
+      <button class="btn-secondary" @tap="goHome">返回大厅</button>
     </view>
   </view>
 </template>
@@ -337,4 +417,26 @@ function goHome() {
   border-radius: 48rpx;
   border: none;
 }
+.challenge-banner {
+  padding: 12rpx 24rpx;
+  background: #fff3e0;
+  color: #e65100;
+  border-radius: 24rpx;
+  font-size: 26rpx;
+  font-weight: bold;
+  margin-bottom: 12rpx;
+  border: 1rpx solid #ffcc80;
+}
+.challenge-banner.beat { background: #e8f5e9; color: #2e7d32; border-color: #a5d6a7; }
+.share-section { width: 100%; margin-top: 16rpx; display: flex; flex-direction: column; align-items: center; gap: 8rpx; }
+.btn-share { width: 100%; background: #ff7043; color: #fff; border-radius: 44rpx; font-size: 30rpx; }
+.btn-share::after { border: none; }
+.share-hint { font-size: 22rpx; color: #b0a090; }
+.share-card { width: 100%; background: #fff; border-radius: 16rpx; padding: 24rpx; margin-top: 16rpx; display: flex; flex-direction: column; gap: 12rpx; border: 1rpx solid #d4c8b8; }
+.share-title { font-size: 28rpx; font-weight: bold; color: #3a2e2e; text-align: center; }
+.share-link { font-size: 22rpx; color: #4a90d9; word-break: break-all; background: #f5f0e8; padding: 12rpx; border-radius: 8rpx; }
+.share-actions { display: flex; flex-direction: row; gap: 16rpx; }
+.btn-small { flex: 1; font-size: 26rpx; border-radius: 24rpx; background: #4a90d9; color: #fff; }
+.btn-small.ghost { background: #fff; color: #4a90d9; border: 1rpx solid #4a90d9; }
+.btn-small::after { border: none; }
 </style>
