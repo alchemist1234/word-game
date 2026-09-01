@@ -41,7 +41,7 @@ export class UserEntity {
   @Column({ type: 'int', default: 5 })
   stamina!: number
 
-  @CreateDateColumn()
+  @Column({ type: 'timestamptz', default: () => 'now()' })
   staminaUpdatedAt!: Date
 
   @Column({ type: 'int', default: 1 })

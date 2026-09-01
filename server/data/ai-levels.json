@@ -1,0 +1,7 @@
+[
+  { "level": "L1", "minLen": 2, "maxLen": 6, "rarities": ["common","normal","rare","idiom"], "sort": "random", "intervalMinMs": 3500, "intervalMaxMs": 5500, "missRateByRarity": { "common": 0.30, "normal": 0.60, "rare": 0.85, "idiom": 0.95 } },
+  { "level": "L2", "minLen": 2, "maxLen": 6, "rarities": ["common","normal","rare","idiom"], "sort": "random", "intervalMinMs": 2800, "intervalMaxMs": 4000, "missRateByRarity": { "common": 0.15, "normal": 0.30, "rare": 0.60, "idiom": 0.80 } },
+  { "level": "L3", "minLen": 2, "maxLen": 6, "rarities": ["common","normal","rare","idiom"], "sort": "idiomFirst", "intervalMinMs": 2000, "intervalMaxMs": 3000, "missRateByRarity": { "common": 0.05, "normal": 0.10, "rare": 0.25, "idiom": 0.40 } },
+  { "level": "L4", "minLen": 2, "maxLen": 6, "rarities": ["common","normal","rare","idiom"], "sort": "scoreDesc", "intervalMinMs": 1500, "intervalMaxMs": 2000, "missRateByRarity": { "common": 0.02, "normal": 0.05, "rare": 0.15, "idiom": 0.25 } },
+  { "level": "L5", "minLen": 2, "maxLen": 6, "rarities": ["common","normal","rare","idiom"], "sort": "scoreDesc", "intervalMinMs": 1000, "intervalMaxMs": 1500, "missRateByRarity": { "common": 0.02, "normal": 0.05, "rare": 0.10, "idiom": 0.15 } }
+]

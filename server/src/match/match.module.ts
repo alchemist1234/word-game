@@ -8,6 +8,8 @@ import { UserEntity } from '../user/user.entity'
 import { GridPoolModule } from '../grid-pool/grid-pool.module'
 import { AuthModule } from '../auth/auth.module'
 import { GameModule } from '../game/game.module'
+import { AiModule } from '../ai/ai.module'
+import { RankModule } from '../rank/rank.module'
 
 /**
  * 实时 1v1 对战模块（迭代6详细设计 §2.2）
@@ -20,6 +22,8 @@ import { GameModule } from '../game/game.module'
     forwardRef(() => GameModule),
     GridPoolModule,
     AuthModule,
+    AiModule,
+    RankModule,
     TypeOrmModule.forFeature([UserEntity, MatchEntity, MatchPlayerEntity]),
   ],
   controllers: [MatchController],

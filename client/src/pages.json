@@ -43,6 +43,14 @@
     {
       "path": "pages/ChallengeRecords/index",
       "style": { "navigationBarTitleText": "我的挑战" }
+    },
+    {
+      "path": "pages/Rank/index",
+      "style": { "navigationBarTitleText": "段位赛" }
+    },
+    {
+      "path": "pages/Battle4p/index",
+      "style": { "navigationBarTitleText": "4人混战" }
     }
   ],
   "globalStyle": {

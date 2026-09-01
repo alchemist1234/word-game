@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Delete, Req, UseGuards } from '@nestjs/common'
+import { Controller, Post, Get, Delete, Req, UseGuards, Body, Query } from '@nestjs/common'
 import { MatchService } from './match.service'
 import { JwtAuthGuard } from '../auth/jwt.guard'
 
@@ -7,25 +7,30 @@ import { JwtAuthGuard } from '../auth/jwt.guard'
 export class MatchController {
   constructor(private readonly matchService: MatchService) {}
 
-  /** 入队匹配（对战固定 standard 5×5，180s） */
   @Post('queue')
-  queue(@Req() req: { user: { userId: number } }) {
-    return this.matchService.queue(req.user.userId)
+  queue(@Req() req: { user: { userId: number } }, @Body() body?: { size?: number; mode?: string }) {
+    const size = body?.size === 4 ? 4 : 2
+    const mode = body?.mode ?? 'casual'
+    return this.matchService.queue(req.user.userId, { size, mode })
   }
 
-  /** 轮询状态：queued / matched / timeout */
   @Get('queue')
-  queueStatus(@Req() req: { user: { userId: number } }) {
-    return this.matchService.queueStatus(req.user.userId)
+  queueStatus(@Req() req: { user: { userId: number } }, @Query('size') sizeQuery?: string) {
+    const size = sizeQuery === '4' ? 4 : 2
+    return this.matchService.queueStatus(req.user.userId, { size })
   }
 
-  /** 取消排队 */
   @Delete('queue')
-  cancel(@Req() req: { user: { userId: number } }) {
-    return this.matchService.cancelQueue(req.user.userId)
+  cancel(@Req() req: { user: { userId: number } }, @Query('size') sizeQuery?: string) {
+    const size = sizeQuery === '4' ? 4 : undefined
+    if (size === 4) return this.matchService.cancelQueue4p(req.user.userId)
+    // cancel both to be safe
+    return this.matchService.cancelQueue(req.user.userId).then(async (r) => {
+      await this.matchService.cancelQueue4p(req.user.userId)
+      return r
+    })
   }
 
-  /** 主动离开对战（判负，对方直接获胜，与得分无关） */
   @Post('abandon')
   async abandon(@Req() req: { user: { userId: number } }) {
     await this.matchService.abandon(req.user.userId)

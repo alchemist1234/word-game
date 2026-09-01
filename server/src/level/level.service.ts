@@ -10,6 +10,7 @@ import Redis from 'ioredis'
 import { GameService } from '../game/game.service'
 import { UserProgressEntity } from '../user/user-progress.entity'
 import { REDIS_TOKEN } from '../common/redis.module'
+import { EconomyService } from '../economy/economy.service'
 import levelsConfig from './levels.json'
 
 interface LevelConfig {
@@ -42,6 +43,7 @@ export class LevelService {
     @InjectRepository(UserProgressEntity)
     private readonly progressRepo: Repository<UserProgressEntity>,
     @Inject(REDIS_TOKEN) private readonly redis: Redis,
+    private readonly economyService: EconomyService,
   ) {}
 
   /** 获取章节地图 + 进度 */
@@ -115,6 +117,7 @@ export class LevelService {
   }> {
     const cfg = LEVELS.find((l) => l.id === levelId)
     if (!cfg) throw new NotFoundException('关卡不存在')
+    await this.economyService.consumeStamina(userId, 1)
     const gridRes = await this.gameService.getGrid(cfg.difficulty, userId, cfg.duration)
     await this.redis.hset(`match_session:${gridRes.matchSessionId}`, {
       levelId,

@@ -10,6 +10,8 @@ import {
   submitDailyRequest,
   submitChallengeRequest,
   submitWord as submitWordHttp,
+  fetchEconomy,
+  fetchRankMe,
   type SubmitWordResponse,
 } from '../api'
 import { connectSocket, sendWs, isWsConnected, type WsMessage } from '../api/socket'
@@ -88,6 +90,15 @@ export const useGameStore = defineStore('game', () => {
   } | null>(null)
   const wsConnected = ref(false)
   const opponentDelta = ref<{ delta: number; total: number } | null>(null)
+  // 迭代8a：经济与段位
+  const economy = ref<{ coins: number; diamonds: number; stamina: number; maxStamina: number; nextRecoverAt: string | null; rankTier: number; rankScore: number } | null>(null)
+  const rankInfo = ref<{ rankTier: number; rankScore: number; wins: number; losses: number; winRate: number; season: string } | null>(null)
+  // 迭代8a：4人混战
+  const battle4pMode = ref(false)
+  const battle4pPlayers = ref<Array<{ userId: number; nickname: string; rankTier: number; score: number; combo: number; rank: number; isAi: boolean }>>([])
+  const battle4pRemaining = ref(0)
+  const battle4pPhase = ref<'idle' | 'queuing' | 'countdown' | 'playing' | 'finished'>('idle')
+  const battle4pEnd = ref<{ myRank: number; won: boolean; ranks: Array<{ userId: number; score: number; rank: number; isAi: boolean }> } | null>(null)
 
   interface MatchPlayerView {
     score: number
@@ -388,10 +399,77 @@ export const useGameStore = defineStore('game', () => {
     }
   }
 
+  function applyMatchStart4pData(d: { matchId: string; grid: string[][]; size: number; duration: number; mySid: string; players: Array<{ userId: number; nickname: string; rankTier: number; isAi: boolean }> }) {
+    battle4pMode.value = true
+    matchMode.value = true
+    matchId.value = d.matchId
+    mySid.value = d.mySid
+    matchSessionId.value = d.mySid
+    grid.value = d.grid
+    score.value = 0
+    combo.value = 0
+    foundWords.value = []
+    battle4pRemaining.value = d.duration
+    matchRemaining.value = d.duration
+    battle4pPhase.value = 'countdown'
+    matchPhase.value = 'countdown'
+    phase.value = 'playing'
+    battle4pPlayers.value = d.players.map(p => ({ ...p, score: 0, combo: 0, rank: 0 }))
+  }
+
   /** WebSocket 消息分发 */
   function handleWsMessage(msg: WsMessage) {
     if (msg.event === 'word_result') {
       handleWordResult(msg.data as SubmitWordResponse)
+      return
+    }
+    if (msg.event === 'match_start_4p') {
+      applyMatchStart4pData(msg.data as { matchId: string; grid: string[][]; size: number; duration: number; mySid: string; players: Array<{ userId: number; nickname: string; rankTier: number; isAi: boolean }> })
+      return
+    }
+    if (msg.event === 'match_tick_4p') {
+      const d = msg.data as { remainingSec: number; myScore: number; myCombo: number; players: Array<{ userId: number; score: number; combo: number; isAi: boolean }>; ranks: Array<{ userId: number; score: number; rank: number }> }
+      battle4pRemaining.value = d.remainingSec
+      matchRemaining.value = d.remainingSec
+      score.value = d.myScore
+      combo.value = d.myCombo
+      phase.value = 'playing'
+      battle4pPhase.value = 'playing'
+      matchPhase.value = 'playing'
+      if (d.ranks) {
+        const rankMap = new Map(d.ranks.map(r => [r.userId, r.rank]))
+        battle4pPlayers.value = battle4pPlayers.value.map(p => ({ ...p, score: d.players.find(x => x.userId === p.userId)?.score ?? p.score, combo: d.players.find(x => x.userId === p.userId)?.combo ?? p.combo, rank: rankMap.get(p.userId) ?? p.rank }))
+      }
+      return
+    }
+    if (msg.event === 'match_end_4p') {
+      const d = msg.data as { matchId: string; myRank: number; won: boolean; ranks: Array<{ userId: number; score: number; rank: number; isAi: boolean }>; my: unknown; winnerUserId: number }
+      battle4pEnd.value = d as unknown as { myRank: number; won: boolean; ranks: Array<{ userId: number; score: number; rank: number; isAi: boolean }> }
+      battle4pPhase.value = 'finished'
+      matchPhase.value = 'finished'
+      phase.value = 'idle'
+      battle4pRemaining.value = 0
+      return
+    }
+    if (msg.event === 'match_restore_4p') {
+      const d = msg.data as { matchId: string; remainingSec: number; myScore: number; grid: string[][]; size: number; mySid: string }
+      battle4pMode.value = true
+      matchMode.value = true
+      matchId.value = d.matchId
+      mySid.value = d.mySid
+      matchSessionId.value = d.mySid
+      grid.value = d.grid
+      battle4pRemaining.value = d.remainingSec
+      matchRemaining.value = d.remainingSec
+      score.value = d.myScore
+      battle4pPhase.value = 'playing'
+      matchPhase.value = 'playing'
+      phase.value = 'playing'
+      return
+    }
+    if (msg.event === 'match_opponent_score_4p') {
+      // 4人飘字复用 opponentDelta
+      opponentDelta.value = msg.data as { delta: number; total: number }
       return
     }
     // 对战事件（迭代6）
@@ -469,8 +547,10 @@ export const useGameStore = defineStore('game', () => {
     if (token) {
       connectSocket(token, handleWsMessage, (connected) => {
         wsConnected.value = connected
-        // 断线重连成功且在对局中：发送 match_join 恢复房间
         if (connected && matchMode.value && matchId.value && matchPhase.value !== 'finished') {
+          sendWs('match_join', { matchId: matchId.value })
+        }
+        if (connected && battle4pMode.value && matchId.value && battle4pPhase.value !== 'finished') {
           sendWs('match_join', { matchId: matchId.value })
         }
       })
@@ -558,6 +638,7 @@ export const useGameStore = defineStore('game', () => {
     grid.value = []
     resetState()
     clearMatchState()
+    clearBattle4pState()
     clearDailyChallengeState()
     clearChallengeStateInternal()
     levelMode.value = false
@@ -578,6 +659,7 @@ export const useGameStore = defineStore('game', () => {
       grid.value = []
       resetState()
       clearMatchState()
+      clearBattle4pState()
       clearDailyChallengeState()
       clearChallengeStateInternal()
       levelMode.value = false
@@ -616,6 +698,26 @@ export const useGameStore = defineStore('game', () => {
     score.value = 0
     combo.value = 0
     clearMatchState()
+    clearBattle4pState()
+  }
+
+  function clearBattle4pState() {
+    battle4pMode.value = false
+    battle4pPlayers.value = []
+    battle4pRemaining.value = 0
+    battle4pPhase.value = 'idle'
+    battle4pEnd.value = null
+  }
+
+  async function refreshEconomy() {
+    try {
+      economy.value = await fetchEconomy()
+    } catch {}
+  }
+  async function refreshRank() {
+    try {
+      rankInfo.value = await fetchRankMe()
+    } catch {}
   }
 
   return {
@@ -664,6 +766,13 @@ export const useGameStore = defineStore('game', () => {
     matchEnd,
     wsConnected,
     opponentDelta,
+    economy,
+    rankInfo,
+    battle4pMode,
+    battle4pPlayers,
+    battle4pRemaining,
+    battle4pPhase,
+    battle4pEnd,
     currentWord,
     startGame,
     startLevel,
@@ -680,7 +789,11 @@ export const useGameStore = defineStore('game', () => {
     abandon,
     resetMatch,
     applyMatchStartData,
+    applyMatchStart4pData,
+    clearBattle4pState,
     clearFeedback,
+    refreshEconomy,
+    refreshRank,
     connectWs,
   }
 })

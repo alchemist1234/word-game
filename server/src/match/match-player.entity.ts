@@ -32,4 +32,10 @@ export class MatchPlayerEntity {
   /** 对应 match_session（Redis 会话 id） */
   @Column({ type: 'varchar', length: 36 })
   sid!: string
+
+  @Column({ type: 'boolean', default: false })
+  isAi!: boolean
+
+  @Column({ type: 'varchar', length: 16, nullable: true })
+  aiLevel!: string | null
 }

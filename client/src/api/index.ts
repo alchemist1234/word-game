@@ -185,7 +185,7 @@ export async function fetchPokedex(): Promise<PokedexResponse> {
   return res.json()
 }
 
-// ===== Match API（迭代6：实时 1v1 对战） =====
+// ===== Match API（迭代6：实时 1v1 对战，迭代8：4人混战） =====
 export interface MatchQueueResponse {
   status: 'queued' | 'matched' | 'timeout'
   matchId?: string
@@ -195,25 +195,28 @@ export interface MatchQueueResponse {
   duration?: number
   mySid?: string
   opponent?: { nickname: string; rankTier: number }
+  players?: Array<{ userId: number; nickname: string; rankTier: number; isAi: boolean }>
 }
 
-/** 入队匹配（对战固定 standard 5×5，180s） */
-export async function queueMatch(): Promise<{ status: string; matchId?: string }> {
-  const res = await request('/match/queue', { method: 'POST' })
+/** 入队匹配（8a：支持 size=4 四人混战，mode=ranked 段位赛） */
+export async function queueMatch(opts?: { size?: number; mode?: string }): Promise<{ status: string; matchId?: string }> {
+  const res = await request('/match/queue', { method: 'POST', body: JSON.stringify(opts ?? {}) })
   if (!res.ok) throw new Error('匹配入队失败')
   return res.json()
 }
 
-/** 轮询匹配状态：queued / matched / timeout */
-export async function matchQueueStatus(): Promise<MatchQueueResponse> {
-  const res = await request('/match/queue')
+/** 轮询匹配状态：queued / matched / timeout（8a：size=4 查询4人队列） */
+export async function matchQueueStatus(size?: number): Promise<MatchQueueResponse> {
+  const qs = size === 4 ? '?size=4' : ''
+  const res = await request(`/match/queue${qs}`)
   if (!res.ok) throw new Error('匹配状态查询失败')
   return res.json()
 }
 
 /** 取消排队 */
-export async function cancelMatchQueue(): Promise<{ cancelled: boolean }> {
-  const res = await request('/match/queue', { method: 'DELETE' })
+export async function cancelMatchQueue(size?: number): Promise<{ cancelled: boolean }> {
+  const qs = size === 4 ? '?size=4' : ''
+  const res = await request(`/match/queue${qs}`, { method: 'DELETE' })
   if (!res.ok) throw new Error('取消匹配失败')
   return res.json()
 }
@@ -327,5 +330,37 @@ export interface LeaderboardResponse {
 export async function fetchLeaderboard(type: string): Promise<LeaderboardResponse> {
   const res = await request(`/leaderboard?type=${type}`)
   if (!res.ok) throw new Error('获取排行榜失败')
+  return res.json()
+}
+
+// ===== Economy API（迭代8a） =====
+export interface EconomyResponse {
+  coins: number
+  diamonds: number
+  stamina: number
+  maxStamina: number
+  nextRecoverAt: string | null
+  rankTier: number
+  rankScore: number
+}
+export async function fetchEconomy(): Promise<EconomyResponse> {
+  const res = await request('/economy/me')
+  if (!res.ok) throw new Error('获取经济信息失败')
+  return res.json()
+}
+
+// ===== Rank API（迭代8a） =====
+export interface RankResponse {
+  rankTier: number
+  rankScore: number
+  wins: number
+  losses: number
+  draws: number
+  winRate: number
+  season: string
+}
+export async function fetchRankMe(): Promise<RankResponse> {
+  const res = await request('/rank/me')
+  if (!res.ok) throw new Error('获取段位失败')
   return res.json()
 }

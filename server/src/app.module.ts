@@ -26,6 +26,9 @@ import { MatchModule } from './match/match.module'
 import { ChallengeModule } from './challenge/challenge.module'
 import { DailyModule } from './daily/daily.module'
 import { LeaderboardModule } from './leaderboard/leaderboard.module'
+import { EconomyModule } from './economy/economy.module'
+import { RankModule } from './rank/rank.module'
+import { AiModule } from './ai/ai.module'
 
 @Module({
   imports: [
@@ -65,6 +68,9 @@ import { LeaderboardModule } from './leaderboard/leaderboard.module'
     ChallengeModule,
     DailyModule,
     LeaderboardModule,
+    EconomyModule,
+    RankModule,
+    AiModule,
   ],
 })
 export class AppModule {}
