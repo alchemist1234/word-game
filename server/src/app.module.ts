@@ -29,6 +29,12 @@ import { LeaderboardModule } from './leaderboard/leaderboard.module'
 import { EconomyModule } from './economy/economy.module'
 import { RankModule } from './rank/rank.module'
 import { AiModule } from './ai/ai.module'
+import { ItemModule } from './item/item.module'
+import { AchievementModule } from './achievement/achievement.module'
+import { WordApplyModule } from './word-apply/word-apply.module'
+import { UserItemEntity } from './item/user-item.entity'
+import { UserAchievementEntity } from './achievement/user-achievement.entity'
+import { WordApplyEntity } from './word-apply/word-apply.entity'
 
 @Module({
   imports: [
@@ -53,6 +59,9 @@ import { AiModule } from './ai/ai.module'
         DailyChallengeEntity,
         DailyAttemptEntity,
         LeaderboardSnapshotEntity,
+        UserItemEntity,
+        UserAchievementEntity,
+        WordApplyEntity,
       ],
       synchronize: true,
     }),
@@ -71,6 +80,9 @@ import { AiModule } from './ai/ai.module'
     EconomyModule,
     RankModule,
     AiModule,
+    ItemModule,
+    AchievementModule,
+    WordApplyModule,
   ],
 })
 export class AppModule {}

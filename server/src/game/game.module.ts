@@ -8,6 +8,7 @@ import { DictionaryModule } from '../dictionary/dictionary.module'
 import { AuthModule } from '../auth/auth.module'
 import { UserFoundWordEntity } from '../user/user-found-word.entity'
 import { MatchModule } from '../match/match.module'
+import { AchievementModule } from '../achievement/achievement.module'
 
 @Module({
   imports: [
@@ -15,6 +16,7 @@ import { MatchModule } from '../match/match.module'
     DictionaryModule,
     AuthModule,
     forwardRef(() => MatchModule),
+    forwardRef(() => AchievementModule),
     TypeOrmModule.forFeature([UserFoundWordEntity]),
   ],
   controllers: [GameController],

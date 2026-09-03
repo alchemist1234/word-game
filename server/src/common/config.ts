@@ -30,4 +30,8 @@ export const config = {
     host: process.env.REDIS_HOST || 'localhost',
     port: parseInt(process.env.REDIS_PORT || '6379', 10),
   },
+  wordApply: {
+    threshold: parseInt(process.env.WORD_APPLY_AUTO_MERGE_THRESHOLD || '10', 10),
+    dailyLimit: parseInt(process.env.WORD_APPLY_DAILY_LIMIT || '5', 10),
+  },
 }

@@ -172,16 +172,28 @@ export async function submitLevel(
   return res.json()
 }
 
-// ===== Pokedex API =====
+// ===== Pokedex API (8b: 分组/释义/称号) =====
 export interface PokedexResponse {
-  words: Array<{ word: string; rarity: string; foundCount: number; firstFoundAt: string }>
+  words: Array<{ word: string; rarity: string; foundCount: number; firstFoundAt: string; meaning?: string | null; tags?: string[]; length?: number }>
   total: number
   collected: number
+  groups?: Array<{ key: string; count: number; words: PokedexResponse['words'] }>
 }
 
-export async function fetchPokedex(): Promise<PokedexResponse> {
-  const res = await request('/pokedex')
+export async function fetchPokedex(query?: { groupBy?: string; rarity?: string; tag?: string }): Promise<PokedexResponse> {
+  const qs = new URLSearchParams()
+  if (query?.groupBy) qs.set('groupBy', query.groupBy)
+  if (query?.rarity) qs.set('rarity', query.rarity)
+  if (query?.tag) qs.set('tag', query.tag)
+  const suffix = qs.toString() ? `?${qs.toString()}` : ''
+  const res = await request(`/pokedex${suffix}`)
   if (!res.ok) throw new Error('获取图鉴失败')
+  return res.json()
+}
+
+export async function fetchPokedexTitles(): Promise<{ collected: number; titles: Array<{ threshold: number; title: string; unlocked: boolean }> }> {
+  const res = await request('/pokedex/titles')
+  if (!res.ok) throw new Error('获取称号失败')
   return res.json()
 }
 
@@ -349,6 +361,47 @@ export async function fetchEconomy(): Promise<EconomyResponse> {
   return res.json()
 }
 
+// ===== WordApply API（迭代9-1：用户申请收录） =====
+export interface WordApplyResponse {
+  applied: boolean
+  alreadyApplied?: boolean
+  inDict?: boolean
+  supporters: number
+  threshold: number
+  status: string
+  autoMerged: boolean
+}
+export interface MyWordApply {
+  word: string
+  status: string
+  supporters: number
+  createdAt: string
+}
+export async function applyWord(
+  word: string,
+  matchSessionId?: string,
+  cells?: CellPos[],
+): Promise<WordApplyResponse> {
+  const res = await request('/word-applies', {
+    method: 'POST',
+    body: JSON.stringify({ word, matchSessionId, cells }),
+  })
+  if (!res.ok) {
+    const data = await res.json().catch(() => null) as { message?: string } | null
+    throw new Error(data?.message || '提交申请失败')
+  }
+  return res.json()
+}
+export async function fetchMyWordApplies(): Promise<{ threshold: number; list: MyWordApply[] }> {
+  const res = await request('/word-applies/mine')
+  if (!res.ok) throw new Error('获取申请列表失败')
+  return res.json()
+}
+export async function fetchWordSupporters(word: string): Promise<WordApplyResponse & { word: string; appliedByMe: boolean }> {
+  const res = await request(`/word-applies/supporters?word=${encodeURIComponent(word)}`)
+  if (!res.ok) throw new Error('获取申请状态失败')
+  return res.json()
+}
 // ===== Rank API（迭代8a） =====
 export interface RankResponse {
   rankTier: number
@@ -362,5 +415,59 @@ export interface RankResponse {
 export async function fetchRankMe(): Promise<RankResponse> {
   const res = await request('/rank/me')
   if (!res.ok) throw new Error('获取段位失败')
+  return res.json()
+}
+
+// ===== Item API (8b) =====
+export interface ItemConfig {
+  id: string
+  name: string
+  desc: string
+  costType: string
+  cost: number
+  maxPerLevel: number
+  allowedModes: string[]
+  effect: string
+  params?: Record<string, unknown>
+  bossOnly?: boolean
+}
+export async function fetchItems(): Promise<{ items: ItemConfig[] }> {
+  const res = await request('/items')
+  if (!res.ok) throw new Error('获取道具失败')
+  return res.json()
+}
+export async function fetchInventory(): Promise<{ items: Array<{ itemId: string; quantity: number }> }> {
+  const res = await request('/inventory')
+  if (!res.ok) throw new Error('获取背包失败')
+  return res.json()
+}
+export async function useItem(matchSessionId: string, itemId: string): Promise<Record<string, unknown>> {
+  const res = await request('/item/use', { method: 'POST', body: JSON.stringify({ matchSessionId, itemId }) })
+  if (!res.ok) throw new Error('使用道具失败')
+  return res.json()
+}
+export async function purchaseItem(itemId: string, quantity = 1): Promise<{ quantity: number }> {
+  const res = await request('/shop/buy', { method: 'POST', body: JSON.stringify({ itemId, quantity }) })
+  if (!res.ok) throw new Error('购买失败')
+  return res.json()
+}
+
+// ===== Achievement API (8b) =====
+export interface AchievementItem {
+  id: string
+  name: string
+  desc: string
+  unlocked: boolean
+  claimed: boolean
+  unlockedAt?: string
+}
+export async function fetchAchievements(): Promise<{ list: AchievementItem[] }> {
+  const res = await request('/achievements')
+  if (!res.ok) throw new Error('获取成就失败')
+  return res.json()
+}
+export async function claimAchievement(achievementId: string): Promise<{ ok: boolean }> {
+  const res = await request('/achievements/claim', { method: 'POST', body: JSON.stringify({ achievementId }) })
+  if (!res.ok) throw new Error('领取失败')
   return res.json()
 }

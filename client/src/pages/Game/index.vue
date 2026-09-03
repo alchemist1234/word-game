@@ -5,30 +5,202 @@ import { useGameStore } from '../../store/game'
 import GridBoard from '../../components/GridBoard.vue'
 import type { CellPos } from '../../core/types'
 import { playSuccess, playIdiom, playFail, playCombo } from '../../utils/sound'
+import { fetchItems, useItem, type ItemConfig, startDailyRequest, startChallengeRequest, fetchInventory, fetchEconomy, applyWord } from '../../api'
 
 const store = useGameStore()
+const itemConfigs = ref<ItemConfig[]>([])
+const hintCell = ref<{ row: number; col: number } | null>(null)
+const hintChar = ref<string | null>(null)
+let freezeTimer: ReturnType<typeof setTimeout> | null = null
+const freezeLeft = ref(0)
+const inventoryMap = ref<Map<string, number>>(new Map())
+const economyInfo = ref<{ coins: number; diamonds: number } | null>(null)
+const usageMap = ref<Map<string, number>>(new Map())
+
+const levelItems = computed(() => itemConfigs.value.filter((it) => it.allowedModes.includes('level')))
+
+// 迭代9-1：未收录词一键申请（仅 not_in_dict，对战中不打扰）
+const applying = ref(false)
+const applyHint = ref('')
+const showApplyEntry = computed(
+  () =>
+    store.lastFailReason === 'not_in_dict' &&
+    !!store.lastFailWord &&
+    store.isInvalidListed(store.lastFailWord) &&
+    !store.matchMode &&
+    !store.battle4pMode,
+)
+watch(
+  () => store.lastFailWord,
+  () => {
+    applyHint.value = ''
+  },
+)
+async function onApplyWord() {
+  const word = store.lastFailWord
+  if (!word || applying.value || store.hasWordApplied(word)) return
+  const attempt = store.invalidAttempts.find((a) => a.word === word)
+  const confirmed = await new Promise<boolean>((resolve) => {
+    uni.showModal({
+      title: `申请收录“${word}”？`,
+      content: '多人申请后将加入词库，本局不加分',
+      confirmText: '提交申请',
+      cancelText: '取消',
+      success: (r) => resolve(!!r.confirm),
+    })
+  })
+  if (!confirmed) return
+  applying.value = true
+  try {
+    const res = await applyWord(word, store.matchSessionId || undefined, attempt?.cells)
+    store.markWordApplied(word)
+    if (res.inDict) applyHint.value = '已收录，新开对局可用'
+    else if (res.autoMerged) applyHint.value = '已加入词库，新开对局可用'
+    else applyHint.value = `已申请 ${res.supporters}/${res.threshold}`
+  } catch (e) {
+    uni.showToast({ title: (e as Error).message || '提交失败', icon: 'none' })
+  } finally {
+    applying.value = false
+  }
+}
+
+function isItemDisabled(it: ItemConfig): boolean {
+  const used = usageMap.value.get(it.id) ?? 0
+  if (used >= it.maxPerLevel) return true
+  if (it.bossOnly && !store.isBossLevel) return true
+  // 道具是否可用：库存>0 或 金币/钻石足以支付单次成本
+  const qty = inventoryMap.value.get(it.id) ?? 0
+  if (qty > 0) return false
+  if (!economyInfo.value) return false // 未加载完成前不置灰
+  if (it.costType === 'coins') return (economyInfo.value.coins ?? 0) < it.cost
+  return (economyInfo.value.diamonds ?? 0) < it.cost
+}
+
+function itemQty(it: ItemConfig): number {
+  return inventoryMap.value.get(it.id) ?? 0
+}
+
+async function loadItems() {
+  try {
+    const res = await fetchItems()
+    itemConfigs.value = res.items
+  } catch {}
+  try {
+    const inv = await fetchInventory()
+    inventoryMap.value = new Map(inv.items.map((i) => [i.itemId, i.quantity]))
+  } catch {}
+  try {
+    const eco = await fetchEconomy()
+    economyInfo.value = { coins: eco.coins, diamonds: eco.diamonds }
+  } catch {}
+}
+
+onShow(() => {
+  loadItems()
+  usageMap.value = new Map()
+})
+
+async function onUseItem(itemId: string) {
+  const cfg = itemConfigs.value.find((i) => i.id === itemId)
+  if (cfg && isItemDisabled(cfg)) {
+    uni.showToast({ title: '道具不可用', icon: 'none' })
+    return
+  }
+  if (!store.matchSessionId) return
+  try {
+    const result = await useItem(store.matchSessionId, itemId)
+    // 更新本地使用计数与经济/库存（用于置灰与角标）
+    usageMap.value.set(itemId, (usageMap.value.get(itemId) ?? 0) + 1)
+    // 刷新库存与经济（角标与可购买判断）
+    fetchInventory().then((inv) => { inventoryMap.value = new Map(inv.items.map((i) => [i.itemId, i.quantity])) }).catch(() => {})
+    fetchEconomy().then((eco) => { economyInfo.value = { coins: eco.coins, diamonds: eco.diamonds } }).catch(() => {})
+    if (itemId === 'hint' && result.hintCell) {
+      const c = result.hintCell as { row: number; col: number }
+      hintCell.value = c
+      // 上方显示对应字（hintWord 首字或格子字），常驻直至该字开头的词被找到
+      const hw = result.hintWord as string | undefined
+      if (hw) hintChar.value = hw[0]
+      else if (store.grid[c.row]?.[c.col]) hintChar.value = store.grid[c.row][c.col]
+      else hintChar.value = null
+    }
+    if (itemId === 'freeze' && result.freezeUntil) {
+      const until = Number(result.freezeUntil)
+      const seconds = (result.seconds as number) ?? 10
+      store.setFreeze(seconds)
+      const left = Math.max(0, Math.ceil((until - Date.now()) / 1000))
+      freezeLeft.value = left
+      if (freezeTimer) clearInterval(freezeTimer)
+      freezeTimer = setInterval(() => {
+        const l = Math.max(0, Math.ceil((until - Date.now()) / 1000))
+        freezeLeft.value = l
+        if (l <= 0 && freezeTimer) { clearInterval(freezeTimer); freezeTimer = null }
+      }, 1000)
+    }
+    if (itemId === 'double') {
+      uni.showToast({ title: '下一词双倍', icon: 'none' })
+    }
+  } catch (e: any) {
+    uni.showToast({ title: e?.message || '使用失败', icon: 'none' })
+  }
+}
+
+// 提示常驻：该字开头的词被找到后自动清除提示
+watch(
+  () => store.foundWords.map((w) => w.word).join(','),
+  () => {
+    if (!hintChar.value || !hintCell.value) return
+    const target = hintChar.value
+    if (store.foundWords.some((w) => w.word[0] === target)) {
+      hintCell.value = null
+      hintChar.value = null
+    }
+  },
+)
+// shuffle 换网格时清除提示（旧坐标失效）
+watch(
+  () => store.grid,
+  () => {
+    // 仅当 grid 引用变化且是 shuffle 触发时，已在 onUseItem 中清空 foundWords，此处同步清提示
+    // 若仍需保留提示则不清除，这里选择清除以防错位
+    if (hintCell.value) {
+      // 检查提示坐标是否仍对应原字，否则清除
+      const c = hintCell.value
+      if (!store.grid[c.row]?.[c.col] || store.grid[c.row][c.col] !== hintChar.value) {
+        hintCell.value = null
+        hintChar.value = null
+      }
+    }
+  },
+)
 
 // 进入页面确保对局进行中（支持 闯关/每日/好友 参数）
-onShow(() => {
-  if (store.phase !== 'playing') {
-    const pages = getCurrentPages()
-    const currentPage = pages[pages.length - 1] as
-      | { options?: { levelId?: string; challengeId?: string; daily?: string } }
-      | undefined
-    const opts = currentPage?.options
-    if (opts?.levelId) {
-      store.startLevel(opts.levelId)
-    } else if (opts?.challengeId || opts?.daily) {
-      // 每日/好友由 store.startDaily/startChallenge 预置过状态，直接兜底自由开局会覆盖；这里仅保自由兜底
-      // 正常流程：Daily/ChallengeEntry 页已调 store.start* 并 redirect，此处不再重开
-      if (store.dailyMode || store.challengeMode) {
-        // 已在对局中，无需操作（redirectTo 已带状态）
-      } else {
-        store.startGame()
-      }
-    } else {
+onShow(async () => {
+  if (store.phase === 'playing') return
+  const pages = getCurrentPages()
+  const currentPage = pages[pages.length - 1] as
+    | { options?: { levelId?: string; challengeId?: string; daily?: string } }
+    | undefined
+  const opts = currentPage?.options
+  if (opts?.levelId) {
+    store.startLevel(opts.levelId)
+  } else if (opts?.challengeId) {
+    // 刷新后 store 丢失，重新拉取同 challenge 网格（同网格，同日不重建）
+    try {
+      const res = await startChallengeRequest(opts.challengeId)
+      store.startChallenge({ matchSessionId: res.matchSessionId, grid: res.grid, duration: res.duration, challengeId: opts.challengeId, challenger: res.challenger })
+    } catch {
       store.startGame()
     }
+  } else if (opts?.daily) {
+    // 日常挑战：同日同一网格，刷新后重新 startDaily 获取同网格（后端 ensureToday 保证同网格）
+    try {
+      const res = await startDailyRequest()
+      store.startDaily(res)
+    } catch {
+      store.startGame()
+    }
+  } else {
+    store.startGame()
   }
 })
 
@@ -113,6 +285,33 @@ const timeText = computed(() => {
 
 const isLowTime = computed(() => store.timeLeft <= 30)
 
+// 关卡目标文案（含specificWord中文要求+实时进度+3星线，与后端calcThresholds同口径）
+function star3(goal: number): number {
+  return Math.max(goal + 1, Math.round(goal * 1.5))
+}
+const objectiveText = computed(() => {
+  if (!store.levelMode || !store.objective) return ''
+  const o = store.objective
+  if (o.type === 'specificWord') {
+    const n = store.foundWords.filter((w) => w.word.includes(o.char ?? '')).length
+    return `找到${o.target ?? 0}个包含“${o.char ?? ''}”字的词语（${n}/${o.target ?? 0}，3星需${star3(o.target ?? 0)}个）`
+  }
+  if (o.type === 'score') {
+    return `目标 ${o.target ?? 0} 分（当前 ${store.score} 分，3星需 ${star3(o.target ?? 0)} 分）`
+  }
+  if (o.type === 'wordCount') {
+    return `找到 ${o.target ?? 0} 个词（${store.foundWords.length}/${o.target ?? 0}，3星需${star3(o.target ?? 0)}个）`
+  }
+  if (o.type === 'idiom') {
+    const n = store.foundWords.filter((w) => w.rarity === 'idiom').length
+    return `找到 ${o.target ?? 0} 个成语（${n}/${o.target ?? 0}，3星需${star3(o.target ?? 0)}个）`
+  }
+  if (o.type === 'timeLimit') {
+    return `限时得 ${o.score ?? 0} 分（当前 ${store.score} 分，3星需 ${star3(o.score ?? 0)} 分）`
+  }
+  return ''
+})
+
 // 连击倒计时（本地 UI 显示，服务端权威判定一致性）
 const COMBO_WINDOW = 10000
 const comboCountdownMs = ref(0)
@@ -126,6 +325,8 @@ function startComboCountdown() {
   comboCountdownMs.value = COMBO_WINDOW
   if (comboInterval) clearInterval(comboInterval)
   comboInterval = setInterval(() => {
+    // 冻结期间连击条暂停
+    if (store.freezeUntil !== null && Date.now() < store.freezeUntil) return
     comboCountdownMs.value -= 100
     if (comboCountdownMs.value <= 0) {
       comboCountdownMs.value = 0
@@ -199,6 +400,27 @@ watch(
       <text v-if="store.isBossLevel" class="boss-label">Boss</text>
       <text class="score">{{ store.score }}<text class="score-unit">分</text></text>
     </view>
+    <view v-if="economyInfo" class="economy-mini">
+      <text class="eco-mini">🪙 {{ economyInfo.coins }}</text>
+      <text class="eco-mini">💎 {{ economyInfo.diamonds }}</text>
+    </view>
+    <view v-if="objectiveText" class="objective-banner">
+      <text class="objective-text">{{ objectiveText }}</text>
+    </view>
+
+    <view v-if="store.levelMode" class="item-bar">
+      <view
+        v-for="it in levelItems"
+        :key="it.id"
+        class="item-btn"
+        :class="{ 'item-btn-disabled': isItemDisabled(it) }"
+        @tap="onUseItem(it.id)"
+      >
+        <text class="item-name">{{ it.name }}</text>
+        <text v-if="itemQty(it) > 0" class="item-badge">{{ itemQty(it) }}</text>
+      </view>
+      <text v-if="freezeLeft > 0" class="freeze-hint">冻结 {{ freezeLeft }}s</text>
+    </view>
 
     <view class="combo-bar" :class="{ 'combo-idle': store.combo === 0 }">
       <text v-if="store.combo > 0" class="combo-text">
@@ -214,11 +436,26 @@ watch(
       <text v-else class="word-placeholder">滑动连接相邻汉字</text>
     </view>
 
+    <view class="apply-slot">
+      <view v-if="showApplyEntry && store.lastFailWord" class="apply-entry">
+        <text class="apply-text">“{{ store.lastFailWord }}”暂未收录</text>
+        <view
+          v-if="!store.hasWordApplied(store.lastFailWord)"
+          class="apply-btn"
+          @tap="onApplyWord"
+        >
+          <text class="apply-btn-text">{{ applying ? '提交中...' : '申请收录' }}</text>
+        </view>
+        <text v-else class="apply-done">{{ applyHint || '已申请' }}</text>
+      </view>
+    </view>
+
     <GridBoard
       v-if="grid.length > 0"
       :grid="grid"
       :selected-cells="store.selectedCells"
       :found-cells="foundCells"
+      :hint-cell="hintCell"
       @select="onSelect"
       @retreat="onRetreat"
       @submit="onSubmit"
@@ -305,6 +542,36 @@ watch(
   color: #8a7a6a;
   margin-left: 8rpx;
 }
+.economy-mini {
+  width: 620rpx;
+  display: flex;
+  flex-direction: row;
+  justify-content: flex-end;
+  gap: 16rpx;
+  margin-bottom: 12rpx;
+}
+.eco-mini {
+  font-size: 24rpx;
+  color: #3a2e2e;
+  background: #fff;
+  border: 1rpx solid #d4c8b8;
+  border-radius: 20rpx;
+  padding: 4rpx 14rpx;
+}
+.objective-banner {
+  width: 620rpx;
+  background: #e8f0fe;
+  border: 1rpx solid #4a90d9;
+  border-radius: 8rpx;
+  padding: 10rpx 16rpx;
+  margin-bottom: 12rpx;
+  text-align: center;
+}
+.objective-text {
+  font-size: 24rpx;
+  color: #2a70b9;
+  font-weight: bold;
+}
 .combo-bar {
   width: 620rpx;
   height: 52rpx; /* 固定高度占位：连击条显隐不影响网格布局，避免 hitTest 错位 */
@@ -356,6 +623,43 @@ watch(
   font-size: 28rpx;
   color: #b0a090;
 }
+.apply-slot {
+  width: 620rpx;
+  height: 56rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 8rpx;
+}
+.apply-entry {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 16rpx;
+  background: #fffbeb;
+  border: 1rpx solid #d4a017;
+  border-radius: 24rpx;
+  padding: 6rpx 12rpx 6rpx 20rpx;
+}
+.apply-text {
+  font-size: 24rpx;
+  color: #b8860b;
+}
+.apply-btn {
+  background: #d4a017;
+  border-radius: 20rpx;
+  padding: 6rpx 20rpx;
+}
+.apply-btn-text {
+  font-size: 24rpx;
+  color: #fff;
+  font-weight: bold;
+}
+.apply-done {
+  font-size: 24rpx;
+  color: #4caf50;
+  font-weight: bold;
+}
 .float-score {
   position: fixed;
   top: 280rpx;
@@ -396,6 +700,14 @@ watch(
   align-content: flex-start;
   overflow-y: auto;
 }
+.item-bar { width: 620rpx; display: flex; flex-direction: row; flex-wrap: wrap; gap: 12rpx; margin-bottom: 16rpx; align-items: center; }
+.item-btn { position: relative; padding: 10rpx 16rpx; background: #fff; border: 1rpx solid #d4c8b8; border-radius: 8rpx; }
+.item-btn-disabled { opacity: 0.4; background: #f0e8d8; }
+.item-name { font-size: 24rpx; color: #3a2e2e; }
+.item-badge { position: absolute; top: -12rpx; right: -12rpx; min-width: 32rpx; height: 32rpx; line-height: 32rpx; text-align: center; background: #d94a4a; color: #fff; font-size: 20rpx; border-radius: 16rpx; padding: 0 6rpx; }
+.freeze-hint { font-size: 22rpx; color: #4a90d9; margin-left: 12rpx; }
+.hint-banner { width: 620rpx; background: #fffbeb; border: 1rpx solid #d4a017; border-radius: 8rpx; padding: 10rpx 16rpx; margin-bottom: 16rpx; text-align: center; }
+.hint-banner-text { font-size: 24rpx; color: #b8860b; font-weight: bold; }
 .found-hint {
   font-size: 22rpx;
   color: #b0a090;

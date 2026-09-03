@@ -31,6 +31,24 @@ export const useGameStore = defineStore('game', () => {
   const lastFeedback = ref<'success' | 'fail' | 'duplicate' | null>(null)
   const lastFloatScore = ref<number | null>(null)
   const lastFoundRarity = ref<string | null>(null)
+  // 迭代9-1：本局未收录词（not_in_dict 去重记录，供结算页申请收录）
+  const invalidAttempts = ref<Array<{ word: string; cells: CellPos[] }>>([])
+  const invalidCounts = ref<Record<string, number>>({})
+  const lastFailWord = ref<string | null>(null)
+  const lastFailReason = ref<string | null>(null)
+  const appliedWords = ref<string[]>([])
+
+  /** 迭代9-1：记录一次未收录失败，连击（提交）满2次才列入申请视野 */
+  function trackInvalidAttempt(word: string, cells: CellPos[]) {
+    const count = (invalidCounts.value[word] ?? 0) + 1
+    invalidCounts.value[word] = count
+    if (count >= 2 && !invalidAttempts.value.some((a) => a.word === word)) {
+      invalidAttempts.value.push({ word, cells })
+    }
+  }
+  function isInvalidListed(word: string): boolean {
+    return invalidAttempts.value.some((a) => a.word === word)
+  }
   const loading = ref(false)
   const errorMsg = ref<string | null>(null)
   const combo = ref(0)
@@ -99,6 +117,7 @@ export const useGameStore = defineStore('game', () => {
   const battle4pRemaining = ref(0)
   const battle4pPhase = ref<'idle' | 'queuing' | 'countdown' | 'playing' | 'finished'>('idle')
   const battle4pEnd = ref<{ myRank: number; won: boolean; ranks: Array<{ userId: number; score: number; rank: number; isAi: boolean }> } | null>(null)
+  const freezeUntil = ref<number | null>(null)
 
   interface MatchPlayerView {
     score: number
@@ -165,6 +184,11 @@ export const useGameStore = defineStore('game', () => {
     unfoundWords.value = []
     pendingWords.value = []
     isBossLevel.value = false
+    invalidAttempts.value = []
+    invalidCounts.value = {}
+    lastFailWord.value = null
+    lastFailReason.value = null
+    appliedWords.value = []
   }
 
   function clearDailyChallengeState() {
@@ -280,10 +304,16 @@ export const useGameStore = defineStore('game', () => {
 
   function tick() {
     if (phase.value !== 'playing') return
+    if (freezeUntil.value !== null && Date.now() < freezeUntil.value) return
+    if (freezeUntil.value !== null && Date.now() >= freezeUntil.value) freezeUntil.value = null
     timeLeft.value--
     if (timeLeft.value <= 0) {
       endGame()
     }
+  }
+
+  function setFreeze(seconds: number) {
+    freezeUntil.value = Date.now() + seconds * 1000
   }
 
   function selectCell(cell: CellPos) {
@@ -309,6 +339,9 @@ export const useGameStore = defineStore('game', () => {
 
     if (cells.length < 2) return
 
+    // 新一轮提交：清掉上一轮失败入口
+    lastFailWord.value = null
+    lastFailReason.value = null
     // 记录待匹配的词（WebSocket 消息有序，FIFO 匹配结果）
     pendingWords.value.push({ word, cells })
     if (isWsConnected()) {
@@ -351,6 +384,11 @@ export const useGameStore = defineStore('game', () => {
             lastFeedback.value = 'duplicate'
           } else {
             lastFeedback.value = 'fail'
+            lastFailWord.value = fallbackWord
+            lastFailReason.value = res.reason ?? 'fail'
+            if (res.reason === 'not_in_dict') {
+              trackInvalidAttempt(fallbackWord, fallbackCells)
+            }
           }
         } catch {
           lastFeedback.value = 'fail'
@@ -396,6 +434,11 @@ export const useGameStore = defineStore('game', () => {
       lastFeedback.value = 'duplicate'
     } else {
       lastFeedback.value = 'fail'
+      lastFailWord.value = pending.word
+      lastFailReason.value = res.reason ?? 'fail'
+      if (res.reason === 'not_in_dict') {
+        trackInvalidAttempt(pending.word, pending.cells)
+      }
     }
   }
 
@@ -677,6 +720,14 @@ export const useGameStore = defineStore('game', () => {
     lastFloatScore.value = null
     lastFoundRarity.value = null
   }
+
+  /** 迭代9-1：标记某词本局已申请（入口置灰） */
+  function markWordApplied(word: string) {
+    if (!appliedWords.value.includes(word)) appliedWords.value.push(word)
+  }
+  function hasWordApplied(word: string): boolean {
+    return appliedWords.value.includes(word)
+  }
   /** 清理对战状态（离开对战/重开时） */
   function clearMatchState() {
     matchMode.value = false
@@ -731,6 +782,11 @@ export const useGameStore = defineStore('game', () => {
     lastFeedback,
     lastFloatScore,
     lastFoundRarity,
+    invalidAttempts,
+    lastFailWord,
+    lastFailReason,
+    appliedWords,
+    isInvalidListed,
     loading,
     errorMsg,
     combo,
@@ -773,6 +829,7 @@ export const useGameStore = defineStore('game', () => {
     battle4pRemaining,
     battle4pPhase,
     battle4pEnd,
+    freezeUntil,
     currentWord,
     startGame,
     startLevel,
@@ -792,8 +849,11 @@ export const useGameStore = defineStore('game', () => {
     applyMatchStart4pData,
     clearBattle4pState,
     clearFeedback,
+    markWordApplied,
+    hasWordApplied,
     refreshEconomy,
     refreshRank,
     connectWs,
+    setFreeze,
   }
 })

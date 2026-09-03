@@ -14,6 +14,8 @@ interface Props {
   selectedCells: CellPos[]
   /** 已找到词的格子 "row,col" 集合，轻微高亮 */
   foundCells: Set<string>
+  /** 提示高亮格（方案B：2s 脉冲） */
+  hintCell?: CellPos | null
 }
 
 const props = defineProps<Props>()
@@ -253,6 +255,10 @@ function selectedOrder(row: number, col: number): number {
 function isFound(row: number, col: number): boolean {
   return props.foundCells.has(`${row},${col}`)
 }
+function isHint(row: number, col: number): boolean {
+  const h = props.hintCell
+  return !!h && h.row === row && h.col === col
+}
 
 // 连线段（每对相邻选中格一条线）
 interface LineSeg {
@@ -302,10 +308,13 @@ const lines = computed<LineSeg[]>(() => {
         :class="{
           'cell-selected': isSelected(ri, ci),
           'cell-found': isFound(ri, ci) && !isSelected(ri, ci),
+          'cell-hint': isHint(ri, ci) && !isSelected(ri, ci),
         }"
       >
         <text class="char">{{ ch }}</text>
         <text v-if="isSelected(ri, ci)" class="order">{{ selectedOrder(ri, ci) + 1 }}</text>
+        <text v-if="isHint(ri, ci) && !isSelected(ri, ci)" class="hint-badge">💡</text>
+        <view v-if="isHint(ri, ci) && !isSelected(ri, ci)" class="hint-ring" />
       </view>
     </view>
     <view class="lines-overlay">
@@ -334,11 +343,13 @@ const lines = computed<LineSeg[]>(() => {
   user-select: none;
   -webkit-user-select: none;
   touch-action: none;
+  overflow: visible;
 }
 .row {
   flex: 1;
   display: flex;
   flex-direction: row;
+  overflow: visible;
 }
 .cell {
   flex: 1;
@@ -349,6 +360,7 @@ const lines = computed<LineSeg[]>(() => {
   border: 1rpx solid #d4c8b8;
   background: #faf6ef;
   box-sizing: border-box;
+  overflow: visible;
 }
 .cell-selected {
   background: #4a90d9;
@@ -387,5 +399,44 @@ const lines = computed<LineSeg[]>(() => {
   background: rgba(74, 144, 217, 0.55);
   transform-origin: 0 50%;
   border-radius: 4rpx;
+}
+.cell-hint {
+  background: #fff4b0 !important;
+  border-color: #d4a017 !important;
+  border-width: 3rpx !important;
+  animation: hint-pulse 0.9s ease-in-out infinite;
+  z-index: 10;
+  /* 提升层级避免右/下侧光晕被相邻格子覆盖（后渲染的兄弟格子会遮挡外扩的 ring） */
+  position: relative;
+}
+.hint-badge {
+  position: absolute;
+  top: 4rpx;
+  right: 6rpx;
+  font-size: 20rpx;
+  line-height: 1;
+}
+.hint-ring {
+  position: absolute;
+  left: -6rpx;
+  top: -6rpx;
+  right: -6rpx;
+  bottom: -6rpx;
+  border: 3rpx solid #d4a017;
+  border-radius: 12rpx;
+  pointer-events: none;
+  animation: hint-ring 1.1s ease-out infinite;
+  z-index: 11;
+  /* 双层光晕确保四边可见 */
+  box-shadow: 0 0 12rpx rgba(212, 160, 23, 0.45);
+}
+@keyframes hint-pulse {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.06); }
+  100% { transform: scale(1); }
+}
+@keyframes hint-ring {
+  0% { transform: scale(0.92); opacity: 0.9; }
+  100% { transform: scale(1.12); opacity: 0; }
 }
 </style>

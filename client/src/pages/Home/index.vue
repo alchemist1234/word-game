@@ -38,6 +38,12 @@ function onLeaderboard() {
 function onChallengeRecords() {
   uni.navigateTo({ url: '/pages/ChallengeRecords/index' })
 }
+function onInventory() {
+  uni.navigateTo({ url: '/pages/Inventory/index' })
+}
+function onAchievement() {
+  uni.navigateTo({ url: '/pages/Achievement/index' })
+}
 function onLogout() {
   disconnectSocket()
   clearToken()
@@ -96,6 +102,16 @@ function onLogout() {
         <text class="menu-icon challenge">邀</text>
         <text class="menu-label">我的挑战</text>
         <text class="menu-desc">好友挑战记录</text>
+      </view>
+      <view class="menu-item" @tap="onInventory">
+        <text class="menu-icon">包</text>
+        <text class="menu-label">背包</text>
+        <text class="menu-desc">道具库存</text>
+      </view>
+      <view class="menu-item" @tap="onAchievement">
+        <text class="menu-icon">成</text>
+        <text class="menu-label">成就</text>
+        <text class="menu-desc">解锁称号与奖励</text>
       </view>
     </view>
 

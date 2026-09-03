@@ -4,8 +4,8 @@ import { Repository } from 'typeorm'
 import { Interval } from '@nestjs/schedule'
 import { UserEntity } from '../user/user.entity'
 
-const MAX_STAMINA = 5
-const RECOVER_MS = 60 * 60 * 1000
+const MAX_STAMINA = 20
+const RECOVER_MS = 5 * 60 * 1000
 
 @Injectable()
 export class EconomyService {
@@ -94,7 +94,7 @@ export class EconomyService {
     await this.userRepo.increment({ id: userId }, 'diamonds', amount)
   }
 
-  @Interval(60 * 60 * 1000)
+  @Interval(5 * 60 * 1000)
   async cronRefill(): Promise<void> {
     // lazy refill is sufficient; this cron is fallback for inactive users
     // paging scan to avoid full table lock

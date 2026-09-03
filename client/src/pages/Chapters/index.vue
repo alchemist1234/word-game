@@ -67,6 +67,7 @@ function onLogout() {
             <text class="level-num">{{ lv.id }}</text>
             <text class="level-title">{{ lv.title }}</text>
             <text v-if="lv.boss" class="boss-tag">Boss</text>
+            <text v-else class="boss-tag boss-tag-placeholder">Boss</text>
             <text class="level-stars">
               {{ lv.stars >= 1 ? '★' : '☆' }}{{ lv.stars >= 2 ? '★' : '☆' }}{{ lv.stars >= 3 ? '★' : '☆' }}
             </text>
@@ -95,13 +96,15 @@ function onLogout() {
 .header-actions { display: flex; flex-direction: row; gap: 24rpx; }
 .action { font-size: 28rpx; color: #4a90d9; }
 .loading { text-align: center; padding: 80rpx; color: #b0a090; }
-.chapter-list { flex: 1; padding: 0 32rpx 40rpx; }
-.chapter { margin-bottom: 32rpx; }
+.chapter-list { flex: 1; padding: 0 32rpx 40rpx; box-sizing: border-box; width: 100%; }
+.chapter { margin-bottom: 32rpx; width: 100%; box-sizing: border-box; }
 .chapter.locked { opacity: 0.5; }
 .chapter-title { font-size: 32rpx; font-weight: bold; color: #3a2e2e; margin-bottom: 16rpx; display: block; }
-.level-grid { display: flex; flex-wrap: wrap; gap: 16rpx; }
+.level-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16rpx; width: 100%; box-sizing: border-box; }
 .level-node {
-  width: 200rpx;
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
   padding: 20rpx 16rpx;
   background: #ffffff;
   border-radius: 12rpx;
@@ -114,7 +117,8 @@ function onLogout() {
 .level-node.boss { border-color: #d94a4a; }
 .level-node.locked { opacity: 0.4; background: #e8e0d0; }
 .level-num { font-size: 22rpx; color: #8a7a6a; }
-.level-title { font-size: 26rpx; color: #3a2e2e; margin: 4rpx 0; }
+.level-title { font-size: 26rpx; color: #3a2e2e; margin: 4rpx 0; min-height: 36rpx; display: flex; align-items: center; text-align: center; }
 .boss-tag { font-size: 20rpx; color: #fff; background: #d94a4a; border-radius: 8rpx; padding: 2rpx 10rpx; margin-top: 4rpx; }
+.boss-tag-placeholder { visibility: hidden; }
 .level-stars { font-size: 24rpx; color: #d4a017; }
 </style>

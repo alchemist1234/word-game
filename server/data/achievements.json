@@ -1,0 +1,12 @@
+[
+  { "id": "first_level", "name": "初出茅庐", "desc": "完成第 1 关", "trigger": "level_complete", "condition": { "level": "1-1" }, "reward": { "coins": 100 } },
+  { "id": "first_idiom", "name": "成语初探", "desc": "首次找到成语", "trigger": "word_found", "condition": { "rarity": "idiom" }, "reward": { "coins": 50 } },
+  { "id": "combo_5", "name": "连击达人", "desc": "单局连击达到 5", "trigger": "maxCombo", "condition": { "minCombo": 5 }, "reward": { "coins": 100 } },
+  { "id": "combo_10", "name": "连击之王", "desc": "单局连击达到 10", "trigger": "maxCombo", "condition": { "minCombo": 10 }, "reward": { "coins": 200 } },
+  { "id": "pokedex_100", "name": "词海拾贝", "desc": "图鉴收集 100 词", "trigger": "pokedex", "condition": { "collected": 100 }, "reward": { "coins": 200 } },
+  { "id": "pokedex_1000", "name": "万词户侯", "desc": "图鉴收集 1000 词", "trigger": "pokedex", "condition": { "collected": 1000 }, "reward": { "diamonds": 10 } },
+  { "id": "rank_scholar", "name": "字圣之路", "desc": "达到字士段位", "trigger": "rank", "condition": { "tier": 5 }, "reward": { "diamonds": 20 } },
+  { "id": "daily_7", "name": "坚持不懈", "desc": "完成 7 次每日挑战", "trigger": "daily", "condition": { "count": 7 }, "reward": { "diamonds": 10 } },
+  { "id": "fourp_win", "name": "四海扬名", "desc": "4 人混战获得第 1 名", "trigger": "match_4p", "condition": { "rank": 1 }, "reward": { "coins": 300 } },
+  { "id": "friend_challenge", "name": "好友切磋", "desc": "完成 1 次好友挑战", "trigger": "challenge", "condition": { "count": 1 }, "reward": { "coins": 100 } }
+]

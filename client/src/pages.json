@@ -51,6 +51,18 @@
     {
       "path": "pages/Battle4p/index",
       "style": { "navigationBarTitleText": "4人混战" }
+    },
+    {
+      "path": "pages/Inventory/index",
+      "style": { "navigationBarTitleText": "背包" }
+    },
+    {
+      "path": "pages/Achievement/index",
+      "style": { "navigationBarTitleText": "成就" }
+    },
+    {
+      "path": "pages/WordApply/index",
+      "style": { "navigationBarTitleText": "我的申请" }
     }
   ],
   "globalStyle": {

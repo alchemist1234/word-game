@@ -1,11 +1,82 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { onShow } from '@dcloudio/uni-app'
 import { useGameStore } from '../../store/game'
+import { applyWord, fetchWordSupporters } from '../../api'
 
 const store = useGameStore()
 const sharing = ref(false)
 const shareLink = ref('')
 const showShareCard = ref(false)
+// 迭代9-1：结算页申请收录（本局未收录词 + 手输补报）
+const manualWord = ref('')
+const applyingWord = ref<string | null>(null)
+const applyStatus = ref<Map<string, string>>(new Map())
+
+async function loadApplyStatus() {
+  applyStatus.value = new Map()
+  for (const a of store.invalidAttempts) {
+    try {
+      const res = await fetchWordSupporters(a.word)
+      if (res.inDict) applyStatus.value.set(a.word, '已收录，新开对局可用')
+      else if (res.appliedByMe || store.hasWordApplied(a.word)) {
+        applyStatus.value.set(a.word, `已申请 ${res.supporters}/${res.threshold}`)
+      }
+    } catch {
+      // 查询失败不阻塞展示，保留申请按钮
+    }
+  }
+}
+
+onShow(() => {
+  loadApplyStatus()
+})
+
+async function onApplyInvalid(word: string) {
+  if (applyingWord.value || store.hasWordApplied(word)) return
+  const attempt = store.invalidAttempts.find((a) => a.word === word)
+  applyingWord.value = word
+  try {
+    const res = await applyWord(word, store.matchSessionId || undefined, attempt?.cells)
+    store.markWordApplied(word)
+    if (res.inDict) applyStatus.value.set(word, '已收录，新开对局可用')
+    else if (res.autoMerged) applyStatus.value.set(word, '已加入词库，新开对局可用')
+    else applyStatus.value.set(word, `已申请 ${res.supporters}/${res.threshold}`)
+  } catch (e) {
+    uni.showToast({ title: (e as Error).message || '提交失败', icon: 'none' })
+  } finally {
+    applyingWord.value = null
+  }
+}
+
+async function onApplyManual() {
+  const word = manualWord.value.trim()
+  if (!word) return
+  if (!/^[\u4e00-\u9fff]{2,6}$/.test(word)) {
+    uni.showToast({ title: '请输入2-6个汉字', icon: 'none' })
+    return
+  }
+  applyingWord.value = word
+  try {
+    const res = await applyWord(word)
+    store.markWordApplied(word)
+    if (!store.invalidAttempts.some((a) => a.word === word)) {
+      store.invalidAttempts.push({ word, cells: [] })
+    }
+    if (res.inDict) applyStatus.value.set(word, '已收录，新开对局可用')
+    else if (res.autoMerged) applyStatus.value.set(word, '已加入词库，新开对局可用')
+    else applyStatus.value.set(word, `已申请 ${res.supporters}/${res.threshold}`)
+    manualWord.value = ''
+  } catch (e) {
+    uni.showToast({ title: (e as Error).message || '提交失败', icon: 'none' })
+  } finally {
+    applyingWord.value = null
+  }
+}
+
+function goWordApplies() {
+  uni.navigateTo({ url: '/pages/WordApply/index' })
+}
 
 const canShareChallenge = computed(() => !store.levelMode && !store.matchMode && store.phase === 'finished')
 const dailyInfoText = computed(() => {
@@ -65,6 +136,9 @@ const sortedWords = computed(() =>
 const idiomCount = computed(
   () => store.foundWords.filter((w) => w.rarity === 'idiom').length,
 )
+
+const RARITY_MAP: Record<string, string> = { common: '常见', normal: '一般', rare: '罕见', idiom: '成语' }
+function rarityLabel(r: string): string { return RARITY_MAP[r] ?? r }
 
 // 潜在词池覆盖率（对齐迭代3详细设计 §7）
 const coveragePercent = computed(() => {
@@ -151,7 +225,7 @@ function goDaily() {
         :class="'rarity-' + fw.rarity"
       >
         <text class="word-text">{{ fw.word }}</text>
-        <text class="word-rarity">{{ fw.rarity }}</text>
+        <text class="word-rarity">{{ rarityLabel(fw.rarity) }}</text>
         <text class="word-score">+{{ fw.score }}</text>
       </view>
       <view v-if="sortedWords.length === 0" class="empty">
@@ -171,6 +245,42 @@ function goDaily() {
           >{{ uw.word }}</text>
         </view>
       </scroll-view>
+    </view>
+
+    <view class="apply-section">
+      <view class="apply-header">
+        <text class="apply-title">本局未收录的词</text>
+        <text class="apply-mine" @tap="goWordApplies">我的申请 ›</text>
+      </view>
+      <text v-if="store.invalidAttempts.length === 0" class="apply-empty">本局没有未收录的词，可手动补充</text>
+      <view
+        v-for="ia in store.invalidAttempts"
+        :key="ia.word"
+        class="apply-row"
+      >
+        <text class="apply-word">{{ ia.word }}</text>
+        <text v-if="applyStatus.get(ia.word)" class="apply-state">{{ applyStatus.get(ia.word) }}</text>
+        <view
+          v-else-if="!store.hasWordApplied(ia.word)"
+          class="apply-btn"
+          @tap="onApplyInvalid(ia.word)"
+        >
+          <text class="apply-btn-text">{{ applyingWord === ia.word ? '提交中...' : '申请收录' }}</text>
+        </view>
+        <text v-else class="apply-state">已申请</text>
+      </view>
+      <view class="apply-manual">
+        <input
+          v-model="manualWord"
+          class="apply-input"
+          placeholder="手动输入要补充的词"
+          :maxlength="6"
+        />
+        <view class="apply-btn" @tap="onApplyManual">
+          <text class="apply-btn-text">提交</text>
+        </view>
+      </view>
+      <text class="apply-hint">多人申请后将加入词库，本局不加分</text>
     </view>
 
     <view v-if="canShareChallenge" class="share-section">
@@ -312,6 +422,8 @@ function goDaily() {
   border-left-color: #4a90d9;
 }
 .word-text {
+  width: 220rpx;
+  flex: none;
   font-size: 36rpx;
   font-weight: bold;
   color: #3a2e2e;
@@ -321,12 +433,18 @@ function goDaily() {
   color: #b8860b;
 }
 .word-rarity {
-  flex: 1;
+  width: 140rpx;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   text-align: center;
   font-size: 22rpx;
   color: #b0a090;
 }
 .word-score {
+  flex: 1;
+  text-align: right;
   font-size: 32rpx;
   font-weight: bold;
   color: #4caf50;
@@ -364,6 +482,85 @@ function goDaily() {
   border-radius: 8rpx;
   background: #f0ece4;
   opacity: 0.75; /* 未找到：淡化显示 */
+}
+.apply-section {
+  width: 100%;
+  margin-top: 16rpx;
+  background: #ffffff;
+  border-radius: 12rpx;
+  border: 1rpx solid #d4a017;
+  padding: 20rpx 24rpx;
+}
+.apply-header {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12rpx;
+}
+.apply-title {
+  font-size: 26rpx;
+  font-weight: bold;
+  color: #3a2e2e;
+}
+.apply-mine {
+  font-size: 24rpx;
+  color: #4a90d9;
+}
+.apply-empty {
+  font-size: 24rpx;
+  color: #b0a090;
+  display: block;
+  margin-bottom: 12rpx;
+}
+.apply-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12rpx 0;
+  border-top: 1rpx solid #f0e8d8;
+}
+.apply-word {
+  font-size: 30rpx;
+  font-weight: bold;
+  color: #3a2e2e;
+  letter-spacing: 4rpx;
+}
+.apply-state {
+  font-size: 24rpx;
+  color: #4caf50;
+}
+.apply-btn {
+  background: #d4a017;
+  border-radius: 20rpx;
+  padding: 8rpx 24rpx;
+}
+.apply-btn-text {
+  font-size: 24rpx;
+  color: #fff;
+  font-weight: bold;
+}
+.apply-manual {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 16rpx;
+  margin-top: 12rpx;
+}
+.apply-input {
+  flex: 1;
+  border: 1rpx solid #d4c8b8;
+  border-radius: 8rpx;
+  padding: 10rpx 16rpx;
+  font-size: 26rpx;
+  min-height: 48rpx;
+}
+.apply-hint {
+  font-size: 22rpx;
+  color: #b0a090;
+  display: block;
+  margin-top: 8rpx;
 }
 .tag-idiom {
   color: #b8860b;

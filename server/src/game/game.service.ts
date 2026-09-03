@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, Inject } from '@nestjs/common'
+import { Injectable, NotFoundException, Inject, forwardRef } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
 import { Repository } from 'typeorm'
 import Redis from 'ioredis'
@@ -10,6 +10,7 @@ import type { CellPos, Rarity } from '../grid-gen/types'
 import { REDIS_TOKEN } from '../common/redis.module'
 import { UserFoundWordEntity } from '../user/user-found-word.entity'
 import { GridPoolEntity } from '../grid-pool/grid-pool.entity'
+import { AchievementService } from '../achievement/achievement.service'
 
 const SESSION_TTL = 600
 const COMBO_WINDOW_MS = 10000
@@ -32,6 +33,8 @@ export class GameService {
     @Inject(REDIS_TOKEN) private readonly redis: Redis,
     @InjectRepository(UserFoundWordEntity)
     private readonly foundWordRepo: Repository<UserFoundWordEntity>,
+    @Inject(forwardRef(() => AchievementService))
+    private readonly achievementService?: AchievementService,
   ) {}
 
   /** 取一张网格并创建对局会话（单人/自由模式） */
@@ -199,8 +202,13 @@ export class GameService {
     const comboBonus = calcComboBonus(combo)
     const newMaxCombo = Math.max(parseInt(session.maxCombo || '0', 10), combo)
 
-    const score =
-      calcScore(entry.length, entry.rarity as Rarity) + comboBonus
+    let score = calcScore(entry.length, entry.rarity as Rarity) + comboBonus
+    // 8b 双倍道具：下一个词得分 ×2
+    let doubleApplied = false
+    if (session.nextDouble === '1') {
+      score *= 2
+      doubleApplied = true
+    }
 
     const currentScore = parseInt(session.score || '0', 10)
     const currentComboScore = parseInt(session.comboScore || '0', 10)
@@ -208,15 +216,17 @@ export class GameService {
     const potentialCount = parseInt(session.potentialCount || '0', 10)
 
     // 写批 pipeline：sadd + hset + expire + scard（4 次往返压 1 次）
-    const writePipe = this.redis.pipeline()
-    writePipe.sadd(foundKey, word)
-    writePipe.hset(`match_session:${matchSessionId}`, {
+    const writeFields: Record<string, string> = {
       score: newScore.toString(),
       comboScore: (currentComboScore + comboBonus).toString(),
       combo: combo.toString(),
       maxCombo: newMaxCombo.toString(),
       lastWordAt: now.toString(),
-    })
+    }
+    if (doubleApplied) writeFields.nextDouble = '0'
+    const writePipe = this.redis.pipeline()
+    writePipe.sadd(foundKey, word)
+    writePipe.hset(`match_session:${matchSessionId}`, writeFields)
     writePipe.expire(foundKey, SESSION_TTL)
     writePipe.scard(foundKey)
     const writeResults = await writePipe.exec()
@@ -317,6 +327,17 @@ export class GameService {
         }
       } catch {
         // 忽略排行榜更新失败
+      }
+      // 成就钩子（8b）— 不影响结算
+      if (this.achievementService) {
+        try {
+          const maxCombo = parseInt(session.maxCombo || '0', 10)
+          if (maxCombo >= 5) await this.achievementService.check(userId, 'maxCombo', { maxCombo })
+          if (foundWords.some((w) => w.rarity === 'idiom')) {
+            await this.achievementService.check(userId, 'word_found', { rarity: 'idiom' })
+          }
+          await this.achievementService.check(userId, 'pokedex', {})
+        } catch {}
       }
     }
 

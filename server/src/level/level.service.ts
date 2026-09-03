@@ -11,6 +11,12 @@ import { GameService } from '../game/game.service'
 import { UserProgressEntity } from '../user/user-progress.entity'
 import { REDIS_TOKEN } from '../common/redis.module'
 import { EconomyService } from '../economy/economy.service'
+import { AchievementService } from '../achievement/achievement.service'
+import { DictionaryService } from '../dictionary/dictionary.service'
+import { generateGrid } from '../grid-gen/grid-gen'
+import { v4 as uuidv4 } from 'uuid'
+import { calcScore } from '../game/check'
+import type { Rarity } from '../grid-gen/types'
 import levelsConfig from './levels.json'
 
 interface LevelConfig {
@@ -44,6 +50,8 @@ export class LevelService {
     private readonly progressRepo: Repository<UserProgressEntity>,
     @Inject(REDIS_TOKEN) private readonly redis: Redis,
     private readonly economyService: EconomyService,
+    private readonly achievementService: AchievementService,
+    private readonly dictionaryService: DictionaryService,
   ) {}
 
   /** 获取章节地图 + 进度 */
@@ -118,6 +126,55 @@ export class LevelService {
     const cfg = LEVELS.find((l) => l.id === levelId)
     if (!cfg) throw new NotFoundException('关卡不存在')
     await this.economyService.consumeStamina(userId, 1)
+    // specificWord 关保底：内存生成多张取最优，不消耗网格池（全清可3星），最多8次
+    if (cfg.objective.type === 'specificWord' && cfg.objective.char) {
+      const goal = cfg.objective.target ?? 0
+      const [, , s3] = this.calcThresholds(goal)
+      const maxAttempts = 8
+      const { words, trie } = await this.dictionaryService.loadAll()
+      let best: {
+        grid: string[][]
+        targetWords: string[]
+        potentialWords: string[]
+        potentialCount: number
+        size: number
+        count: number
+      } | null = null
+      for (let i = 0; i < maxAttempts; i++) {
+        const g = generateGrid(cfg.difficulty, words, trie)
+        const count = g.potentialWords.filter((w) => w.includes(cfg.objective.char!)).length
+        if (!best || count > best.count) {
+          best = { ...g, count }
+        }
+        if (count >= s3) break
+      }
+      if (best) {
+        const raw = {
+          id: `level-${cfg.id}-${uuidv4()}`,
+          grid: best.grid,
+          targetWords: best.targetWords,
+          potentialWords: best.potentialWords,
+          potentialCount: best.potentialCount,
+          size: best.size,
+        }
+        const sess = await this.gameService.createSessionFromRaw(raw, userId, cfg.duration)
+        await this.redis.hset(`match_session:${sess.matchSessionId}`, {
+          levelId,
+          objective: JSON.stringify(cfg.objective),
+          isLevelMode: '1',
+        })
+        return {
+          matchSessionId: sess.matchSessionId,
+          grid: sess.grid,
+          size: sess.size,
+          duration: cfg.duration,
+          objective: cfg.objective,
+          stars: cfg.stars,
+          title: cfg.title,
+          boss: !!cfg.boss,
+        }
+      }
+    }
     const gridRes = await this.gameService.getGrid(cfg.difficulty, userId, cfg.duration)
     await this.redis.hset(`match_session:${gridRes.matchSessionId}`, {
       levelId,
@@ -165,11 +222,21 @@ export class LevelService {
     const result = await this.gameService.endGame(matchSessionId)
     const actualValue = this.calcActualValue(cfg.objective, result)
     const goal = this.calcGoalValue(cfg.objective)
-    const stars = this.calcStars(actualValue, goal)
+    const maxAchievable = this.calcMaxAchievable(cfg.objective, session)
+    const stars = this.calcStars(actualValue, goal, maxAchievable)
 
     if (stars >= 1) {
       await this.upsertProgress(userId, cfg.id, stars, result.score)
     }
+    // 成就钩子（8b）
+    try {
+      await this.achievementService.check(userId, 'level_complete', { levelId: cfg.id })
+      await this.achievementService.check(userId, 'maxCombo', { maxCombo: result.maxCombo })
+      if (result.foundWords.some((w) => w.rarity === 'idiom')) {
+        await this.achievementService.check(userId, 'word_found', { rarity: 'idiom' })
+      }
+      await this.achievementService.check(userId, 'pokedex', {})
+    } catch {}
 
     // 本关是否已通关：本次 ≥1 星，或历史已 ≥1 星（0 星不写进度，历史记录即通关）
     let maxStars = stars
@@ -235,12 +302,78 @@ export class LevelService {
   /**
    * 动态星级：1星=目标×0.5（接近完成即有星），2星=达成目标，3星=目标×1.5（超额）
    * 修复"找到接近目标却 0 星"的不合理体验
+   * 全清必3星：用本局最大可达成数对阈值封顶，actual==max时必>=s3_eff
    */
-  private calcStars(actualValue: number, goal: number): number {
-    if (goal <= 0) return actualValue > 0 ? 1 : 0
+  private calcThresholds(goal: number): [number, number, number] {
     const s1 = Math.max(1, Math.round(goal * 0.5))
     const s2 = Math.max(1, goal)
     const s3 = Math.max(s2 + 1, Math.round(goal * 1.5))
+    return [s1, s2, s3]
+  }
+
+  private countCharInSession(session: Record<string, string>, char: string): number {
+    if (!session?.potentialWords) return 0
+    try {
+      const potential = JSON.parse(session.potentialWords) as string[]
+      return potential.filter((w) => w.includes(char)).length
+    } catch {
+      return 0
+    }
+  }
+
+  private calcMaxAchievable(
+    objective: LevelConfig['objective'],
+    session: Record<string, string>,
+  ): number {
+    let potential: string[] = []
+    try {
+      potential = session?.potentialWords ? (JSON.parse(session.potentialWords) as string[]) : []
+    } catch {
+      potential = []
+    }
+    let withRarity: Array<{ word: string; rarity: string; length: number }> = []
+    try {
+      withRarity = session?.potentialWordsWithRarity
+        ? (JSON.parse(session.potentialWordsWithRarity) as Array<{
+            word: string
+            rarity: string
+            length: number
+          }>)
+        : []
+    } catch {
+      withRarity = []
+    }
+    switch (objective.type) {
+      case 'specificWord':
+        return potential.filter((w) => w.includes(objective.char ?? '')).length
+      case 'wordCount':
+        return potential.length
+      case 'idiom':
+        if (withRarity.length > 0) return withRarity.filter((p) => p.rarity === 'idiom').length
+        return 0
+      case 'score':
+      case 'timeLimit':
+        if (withRarity.length > 0) {
+          return withRarity.reduce(
+            (sum, p) => sum + calcScore(p.length, p.rarity as Rarity),
+            0,
+          )
+        }
+        return potential.length * 2
+      default:
+        return potential.length
+    }
+  }
+
+  private calcStars(actualValue: number, goal: number, maxAchievable?: number): number {
+    if (goal <= 0) return actualValue > 0 ? 1 : 0
+    let [s1, s2, s3] = this.calcThresholds(goal)
+    if (maxAchievable !== undefined) {
+      if (maxAchievable <= 0) return 0
+      s1 = Math.min(s1, maxAchievable)
+      s2 = Math.min(s2, maxAchievable)
+      s3 = Math.min(s3, maxAchievable)
+    }
     if (actualValue >= s3) return 3
     if (actualValue >= s2) return 2
     if (actualValue >= s1) return 1

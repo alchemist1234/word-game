@@ -30,8 +30,19 @@ export class DictionaryService implements OnModuleInit {
     if (this.trie && this.words.length > 0) {
       return { words: this.words, trie: this.trie }
     }
+    await this.reload()
+    return { words: this.words, trie: this.trie! }
+  }
+
+  /** 热刷新：自动入库后重建内存索引并原子替换（迭代9-1） */
+  async refresh(): Promise<void> {
+    await this.reload()
+  }
+
+  private async reload(): Promise<void> {
     const entities = await this.repo.find()
     const trie = new Trie()
+    const cache = new Map<string, DictWord>()
     const words: DictWord[] = entities.map((e) => ({
       word: e.word,
       length: e.length,
@@ -42,10 +53,10 @@ export class DictionaryService implements OnModuleInit {
     }))
     for (const w of words) {
       trie.insert(w.word)
-      this.cache.set(w.word, w)
+      cache.set(w.word, w)
     }
     this.words = words
     this.trie = trie
-    return { words, trie }
+    this.cache = cache
   }
 }

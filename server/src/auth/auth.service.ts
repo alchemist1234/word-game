@@ -49,10 +49,12 @@ export class AuthService {
       user = await this.userRepo.findOne({ where: { id: auth.userId } })
       if (!user) throw new NotFoundException('用户数据缺失')
     } else {
-      // 新建用户
+      // 新建用户（8b：初始经济，避免提示等道具因 0 金币始终失败）
       user = this.userRepo.create({
         phone: extra.phone ?? null,
         nickname: '玩家' + Math.floor(Math.random() * 100000).toString(),
+        coins: 200,
+        diamonds: 10,
       })
       await this.userRepo.save(user)
       auth = this.authRepo.create({ userId: user.id, platform, openid })
