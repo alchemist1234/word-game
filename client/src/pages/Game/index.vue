@@ -84,15 +84,21 @@ async function loadItems() {
   try {
     const res = await fetchItems()
     itemConfigs.value = res.items
-  } catch {}
+  } catch (error: unknown) {
+    console.warn('[Game] load items failed', error)
+  }
   try {
     const inv = await fetchInventory()
     inventoryMap.value = new Map(inv.items.map((i) => [i.itemId, i.quantity]))
-  } catch {}
+  } catch (error: unknown) {
+    console.warn('[Game] load inventory failed', error)
+  }
   try {
     const eco = await fetchEconomy()
     economyInfo.value = { coins: eco.coins, diamonds: eco.diamonds }
-  } catch {}
+  } catch (error: unknown) {
+    console.warn('[Game] load economy failed', error)
+  }
 }
 
 onShow(() => {
@@ -112,8 +118,12 @@ async function onUseItem(itemId: string) {
     // 更新本地使用计数与经济/库存（用于置灰与角标）
     usageMap.value.set(itemId, (usageMap.value.get(itemId) ?? 0) + 1)
     // 刷新库存与经济（角标与可购买判断）
-    fetchInventory().then((inv) => { inventoryMap.value = new Map(inv.items.map((i) => [i.itemId, i.quantity])) }).catch(() => {})
-    fetchEconomy().then((eco) => { economyInfo.value = { coins: eco.coins, diamonds: eco.diamonds } }).catch(() => {})
+    fetchInventory().then((inv) => { inventoryMap.value = new Map(inv.items.map((i) => [i.itemId, i.quantity])) }).catch((error: unknown) => {
+      console.warn('[Game] refresh inventory failed', error)
+    })
+    fetchEconomy().then((eco) => { economyInfo.value = { coins: eco.coins, diamonds: eco.diamonds } }).catch((error: unknown) => {
+      console.warn('[Game] refresh economy failed', error)
+    })
     if (itemId === 'hint' && result.hintCell) {
       const c = result.hintCell as { row: number; col: number }
       hintCell.value = c
@@ -139,8 +149,9 @@ async function onUseItem(itemId: string) {
     if (itemId === 'double') {
       uni.showToast({ title: '下一词双倍', icon: 'none' })
     }
-  } catch (e: any) {
-    uni.showToast({ title: e?.message || '使用失败', icon: 'none' })
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : '使用失败'
+    uni.showToast({ title: message, icon: 'none' })
   }
 }
 
@@ -389,6 +400,9 @@ watch(
 
 <template>
   <view class="game" :class="{ 'game-fail': failFlash }">
+    <view v-if="store.errorMsg" class="error-banner">
+      <text>{{ store.errorMsg }}</text>
+    </view>
     <view v-if="store.dailyMode" class="mode-banner daily-banner">
       <text>每日挑战 · {{ store.dailyDate }}</text>
     </view>
@@ -495,6 +509,17 @@ watch(
 }
 .game-fail {
   background: #f8d8d8;
+}
+.error-banner {
+  width: 620rpx;
+  padding: 16rpx;
+  margin-bottom: 12rpx;
+  border-radius: 8rpx;
+  background: #ffebee;
+  color: #b71c1c;
+  border: 1rpx solid #ef9a9a;
+  font-size: 24rpx;
+  text-align: center;
 }
 .mode-banner {
   width: 620rpx;

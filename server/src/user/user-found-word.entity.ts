@@ -22,9 +22,9 @@ export class UserFoundWordEntity {
   @Column({ length: 8 })
   rarity!: string
 
-  @Column({ type: 'int', default: 1 })
+  @Column({ type: 'int', name: 'found_count', default: 1 })
   foundCount!: number
 
-  @CreateDateColumn()
+  @CreateDateColumn({ name: 'first_found_at' })
   firstFoundAt!: Date
 }

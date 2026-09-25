@@ -83,20 +83,34 @@ export class GameGateway
   @SubscribeMessage('submit_word')
   async handleSubmitWord(
     client: WebSocket,
-    payload: { sid: string; word: string; cells: number[][] },
+    payload: unknown,
   ): Promise<{ event: string; data: unknown }> {
     const data = clientData.get(client)
     if (!data) {
       return { event: 'error', data: { message: 'unauthorized' } }
     }
     try {
-      const cells: CellPos[] = payload.cells.map(([row, col]) => ({
+      const message = this.unwrapMessage<{
+        sid: string
+        word: string
+        cells: number[][]
+      }>(payload)
+      if (
+        !message ||
+        typeof message.sid !== 'string' ||
+        typeof message.word !== 'string' ||
+        !Array.isArray(message.cells)
+      ) {
+        return { event: 'error', data: { message: 'invalid submit_word payload' } }
+      }
+      const cells: CellPos[] = message.cells.map(([row, col]) => ({
         row,
         col,
       }))
       const result = await this.gameService.submitWord(
-        payload.sid,
-        payload.word,
+        data.userId,
+        message.sid,
+        message.word,
         cells,
       )
       // 对战会话：提词成功后广播双方分数（增量 <1s 感知）
@@ -113,18 +127,28 @@ export class GameGateway
   @SubscribeMessage('match_join')
   async handleMatchJoin(
     client: WebSocket,
-    payload: { matchId: string },
+    payload: unknown,
   ): Promise<{ event: string; data: unknown }> {
     const data = clientData.get(client)
     if (!data) {
       return { event: 'error', data: { message: 'unauthorized' } }
     }
-    if (!payload?.matchId) {
+    const message = this.unwrapMessage<{ matchId: string }>(payload)
+    if (!message?.matchId) {
       return { event: 'error', data: { message: 'missing matchId' } }
     }
     this.matchService.registerClient(data.userId, client)
-    await this.matchService.handleJoin(data.userId, payload.matchId)
-    return { event: 'match_join_ack', data: { matchId: payload.matchId } }
+    await this.matchService.handleJoin(data.userId, message.matchId)
+    return { event: 'match_join_ack', data: { matchId: message.matchId } }
+  }
+
+  private unwrapMessage<T>(payload: unknown): T | null {
+    if (!payload || typeof payload !== 'object') return null
+    if ('data' in payload) {
+      const data = (payload as { data?: unknown }).data
+      return data && typeof data === 'object' ? (data as T) : null
+    }
+    return payload as T
   }
 
   /** 心跳 */

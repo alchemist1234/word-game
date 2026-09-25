@@ -3,6 +3,8 @@ import {
   NotFoundException,
   BadRequestException,
   Inject,
+  ForbiddenException,
+  Logger,
 } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
 import { Repository } from 'typeorm'
@@ -44,6 +46,8 @@ const CHAPTER_TITLES: Record<number, string> = {
 
 @Injectable()
 export class LevelService {
+  private readonly logger = new Logger(LevelService.name)
+
   constructor(
     private readonly gameService: GameService,
     @InjectRepository(UserProgressEntity)
@@ -89,7 +93,12 @@ export class LevelService {
             id: l.id,
             title: l.title,
             stars: progressMap.get(l.id)?.stars ?? 0,
-            unlocked: this.isLevelUnlocked(l, levels, progressMap),
+            unlocked: this.isLevelUnlocked(
+              l,
+              levels,
+              progressMap,
+              prevChapterAllCleared,
+            ),
             boss: !!l.boss,
           })),
         }
@@ -102,7 +111,9 @@ export class LevelService {
     level: LevelConfig,
     levels: LevelConfig[],
     progressMap: Map<string, UserProgressEntity>,
+    chapterUnlocked: boolean,
   ): boolean {
+    if (!chapterUnlocked) return false
     if (level.level === 1) return true
     const prev = levels.find((l) => l.level === level.level - 1)
     if (!prev) return true
@@ -125,6 +136,24 @@ export class LevelService {
   }> {
     const cfg = LEVELS.find((l) => l.id === levelId)
     if (!cfg) throw new NotFoundException('关卡不存在')
+    const progress = await this.progressRepo.find({ where: { userId } })
+    const progressMap = new Map(progress.map((p) => [p.levelId, p]))
+    const chapterLevels = LEVELS.filter((l) => l.chapter === cfg.chapter)
+    const chapterUnlocked =
+      cfg.chapter === 1 ||
+      LEVELS.filter((l) => l.chapter === cfg.chapter - 1).every(
+        (l) => (progressMap.get(l.id)?.stars ?? 0) >= 1,
+      )
+    if (
+      !this.isLevelUnlocked(
+        cfg,
+        chapterLevels,
+        progressMap,
+        chapterUnlocked,
+      )
+    ) {
+      throw new ForbiddenException('关卡尚未解锁')
+    }
     await this.economyService.consumeStamina(userId, 1)
     // specificWord 关保底：内存生成多张取最优，不消耗网格池（全清可3星），最多8次
     if (cfg.objective.type === 'specificWord' && cfg.objective.char) {
@@ -216,10 +245,13 @@ export class LevelService {
     if (!session?.levelId) {
       throw new BadRequestException('非闯关会话或会话已过期')
     }
+    if (session.userId !== userId.toString()) {
+      throw new ForbiddenException('会话不属于当前用户')
+    }
     const cfg = LEVELS.find((l) => l.id === session.levelId)
     if (!cfg) throw new NotFoundException('关卡配置不存在')
 
-    const result = await this.gameService.endGame(matchSessionId)
+    const result = await this.gameService.endGame(userId, matchSessionId)
     const actualValue = this.calcActualValue(cfg.objective, result)
     const goal = this.calcGoalValue(cfg.objective)
     const maxAchievable = this.calcMaxAchievable(cfg.objective, session)
@@ -230,13 +262,17 @@ export class LevelService {
     }
     // 成就钩子（8b）
     try {
-      await this.achievementService.check(userId, 'level_complete', { levelId: cfg.id })
+      if (stars >= 1) {
+        await this.achievementService.check(userId, 'level_complete', { levelId: cfg.id })
+      }
       await this.achievementService.check(userId, 'maxCombo', { maxCombo: result.maxCombo })
       if (result.foundWords.some((w) => w.rarity === 'idiom')) {
         await this.achievementService.check(userId, 'word_found', { rarity: 'idiom' })
       }
       await this.achievementService.check(userId, 'pokedex', {})
-    } catch {}
+    } catch (error) {
+      this.logger.warn(`level achievement check failed: ${(error as Error).message}`)
+    }
 
     // 本关是否已通关：本次 ≥1 星，或历史已 ≥1 星（0 星不写进度，历史记录即通关）
     let maxStars = stars

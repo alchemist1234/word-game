@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
-import { Repository } from 'typeorm'
+import { In, Repository } from 'typeorm'
 import { UserFoundWordEntity } from '../user/user-found-word.entity'
 import { DictionaryEntity } from '../dictionary/dictionary.entity'
 
@@ -65,11 +65,11 @@ export class PokedexService {
     // enrich with meaning/tags/length from dictionary
     const dictMap = new Map<string, DictionaryEntity>()
     if (words.length > 0) {
+      const wordValues = words.map((word) => word.word)
       const dictWords = await this.dictRepo.find({
-        where: words.map((w) => ({ word: w.word } as any)),
-      } as any)
-      // fallback: load all if IN query not support, but TypeORM find with array uses IN
-      // For safety, if not all found, bulk load
+        where: { word: In(wordValues) },
+      })
+      // 若部分历史数据不在 dictionary 中，再补一次全量查询，兼容旧会话。
       if (dictWords.length < words.length) {
         const all = await this.dictRepo.find()
         for (const d of all) dictMap.set(d.word, d)

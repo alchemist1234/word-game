@@ -35,6 +35,7 @@ import { WordApplyModule } from './word-apply/word-apply.module'
 import { UserItemEntity } from './item/user-item.entity'
 import { UserAchievementEntity } from './achievement/user-achievement.entity'
 import { WordApplyEntity } from './word-apply/word-apply.entity'
+import { GameSettlementEntity } from './game/game-settlement.entity'
 
 @Module({
   imports: [
@@ -62,6 +63,7 @@ import { WordApplyEntity } from './word-apply/word-apply.entity'
         UserItemEntity,
         UserAchievementEntity,
         WordApplyEntity,
+        GameSettlementEntity,
       ],
       synchronize: true,
     }),

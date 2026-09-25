@@ -64,8 +64,27 @@ export interface PathValidation {
 }
 
 /** 校验路径合法性：至少 2 字、逐对 8 向相邻、无重复格 */
-export function validatePath(cells: CellPos[]): PathValidation {
-  if (cells.length < 2) return { valid: false, reason: 'path_invalid' }
+export function validatePath(cells: CellPos[], size?: number): PathValidation {
+  if (!Array.isArray(cells) || cells.length < 2) {
+    return { valid: false, reason: 'path_invalid' }
+  }
+  if (
+    cells.some(
+      (c) =>
+        c === null ||
+        typeof c !== 'object' ||
+        !Number.isInteger(c.row) ||
+        !Number.isInteger(c.col),
+    ) ||
+    (size !== undefined &&
+      (!Number.isInteger(size) ||
+        size <= 0 ||
+        cells.some(
+          (c) => c.row < 0 || c.col < 0 || c.row >= size || c.col >= size,
+        )))
+  ) {
+    return { valid: false, reason: 'path_invalid' }
+  }
   for (let i = 1; i < cells.length; i++) {
     if (!isAdjacent(cells[i - 1], cells[i])) {
       return { valid: false, reason: 'path_invalid' }

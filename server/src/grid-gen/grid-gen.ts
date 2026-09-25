@@ -157,6 +157,15 @@ function tryGenerateOnce(
     grid.map((r) => r.map((c) => c as string)),
     trie,
   )
+  const potentialSet = new Set(potentialWords)
+  // 目标词必须仍然存在于最终网格；否则宁可重试，也不返回不可玩的网格。
+  if (
+    placed.length === 0 ||
+    placed.some((word) => !potentialSet.has(word)) ||
+    potentialWords.length < placed.length
+  ) {
+    return null
+  }
   return {
     grid: grid.map((r) => r.map((c) => c as string)),
     targetWords: placed,
@@ -185,7 +194,8 @@ export function generateGrid(
   let best: GeneratedGrid | null = null
   let bestDist = Infinity
 
-  for (let round = 0; round < maxRounds; round++) {
+  const rounds = difficulty === 'hard' ? Math.max(maxRounds, 40) : maxRounds
+  for (let round = 0; round < rounds; round++) {
     const g = tryGenerateOnce(
       size,
       minTarget,
@@ -218,18 +228,5 @@ export function generateGrid(
   )
   if (relaxed) return relaxed
 
-  // 极兜底：填满字的网格（targetWords 可能为空，极少发生）
-  const grid = makeEmpty(size)
-  fillEmpty(grid)
-  const potentialWords = computePotential(
-    grid.map((r) => r.map((c) => c as string)),
-    trie,
-  )
-  return {
-    grid: grid.map((r) => r.map((c) => c as string)),
-    targetWords: [],
-    potentialCount: potentialWords.length,
-    potentialWords,
-    size,
-  }
+  throw new Error('无法生成包含目标词的可玩网格，请检查词库数据')
 }

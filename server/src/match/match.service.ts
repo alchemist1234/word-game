@@ -20,14 +20,16 @@ import { MatchPlayerEntity } from './match-player.entity'
 import { decideWinner, type PlayerStats } from './match-decision'
 import { AiService } from '../ai/ai.service'
 import { RankService } from '../rank/rank.service'
-import { calcScore } from '../game/check'
-import type { Rarity } from '../grid-gen/types'
+import { SUBMIT_WORD_SCRIPT } from '../game/redis-scripts'
 
 const QUEUE_TIMEOUT_MS = 30000
 const DISCONNECT_GRACE_MS = 30000
 const MATCH_DURATION = 180
 const COUNTDOWN_SEC = 3
 const MATCH_TIERS = [1, 2, 3, 4, 5, 6, 7]
+const SESSION_TTL = 600
+const COMBO_WINDOW_MS = 10000
+const MAX_COMBO = 10
 
 interface RoomPlayer {
   sid: string
@@ -62,6 +64,7 @@ export class MatchService implements OnModuleDestroy {
   private readonly playerMatch = new Map<number, string>()
   private readonly userClients = new Map<number, WebSocket>()
   private aiIdSeq = -1
+  private readonly queueLocks = new Set<string>()
 
   registerClient(userId: number, client: WebSocket): void {
     this.userClients.set(userId, client)
@@ -241,7 +244,11 @@ export class MatchService implements OnModuleDestroy {
   }
 
   private async tryPairQueue(tier: number): Promise<void> {
-    const key = `match_queue:${tier}`
+    const lockKey = `1v1:${tier}`
+    if (this.queueLocks.has(lockKey)) return
+    this.queueLocks.add(lockKey)
+    try {
+      const key = `match_queue:${tier}`
     const ids = await this.redis.lrange(key, 0, -1)
     if (ids.length >= 2) {
       const picked: number[] = []
@@ -286,10 +293,17 @@ export class MatchService implements OnModuleDestroy {
         }
       }
     }
+    } finally {
+      this.queueLocks.delete(lockKey)
+    }
   }
 
   private async tryPairQueue4p(tier: number): Promise<void> {
-    const key = `match_queue_4p:${tier}`
+    const lockKey = `4p:${tier}`
+    if (this.queueLocks.has(lockKey)) return
+    this.queueLocks.add(lockKey)
+    try {
+      const key = `match_queue_4p:${tier}`
     const ids = await this.redis.lrange(key, 0, -1)
     if (ids.length === 0) return
     if (ids.length >= 4) {
@@ -332,6 +346,9 @@ export class MatchService implements OnModuleDestroy {
         this.logger.warn(`setupMatch4p AI fill failed: ${(e as Error).message}`)
         for (const uid of picked) { await this.redis.rpush(key, uid.toString()); await this.redis.hset(`match_queue_4p_meta:${uid}`, { tier: tier.toString(), enqueuedAt: Date.now().toString() }) }
       }
+    }
+    } finally {
+      this.queueLocks.delete(lockKey)
     }
   }
 
@@ -482,8 +499,12 @@ export class MatchService implements OnModuleDestroy {
     room.remainingSec--
     await this.broadcastScores(room, false)
     if (room.remainingSec <= 0) {
-      if (room.type === 'pvp_4p') await this.finishMatch4p(matchId)
-      else await this.finishMatch(matchId)
+      try {
+        if (room.type === 'pvp_4p') await this.finishMatch4p(matchId)
+        else await this.finishMatch(matchId)
+      } catch (error) {
+        this.logger.error(`match ${matchId} settlement failed: ${(error as Error).message}`)
+      }
     }
   }
 
@@ -569,10 +590,25 @@ export class MatchService implements OnModuleDestroy {
     const ids = [...room.players.keys()]
     const [aId, bId] = ids
     const pa = room.players.get(aId)!, pb = room.players.get(bId)!
-    const [statsA, statsB] = await Promise.all([this.settlePlayer(pa.sid), this.settlePlayer(pb.sid)])
-    const winner = decideWinner(statsA, statsB)
-    const effectiveWinner = forfeitUserId === undefined ? winner : forfeitUserId === aId ? 2 : forfeitUserId === bId ? 1 : winner
-    const winnerUserId = effectiveWinner === 0 ? null : effectiveWinner === 1 ? aId : bId
+    let statsA: PlayerStats
+    let statsB: PlayerStats
+    try {
+      const settled = await Promise.all([
+        this.settlePlayerWithRetry(pa.sid, aId),
+        this.settlePlayerWithRetry(pb.sid, bId),
+      ])
+      statsA = settled[0]
+      statsB = settled[1]
+    } catch (error) {
+      await this.handleSettlementFailure(matchId, room, ids, error)
+      return
+    }
+    let effectiveWinner: number
+    let winnerUserId: number | null
+    try {
+      const winner = decideWinner(statsA, statsB)
+      effectiveWinner = forfeitUserId === undefined ? winner : forfeitUserId === aId ? 2 : forfeitUserId === bId ? 1 : winner
+      winnerUserId = effectiveWinner === 0 ? null : effectiveWinner === 1 ? aId : bId
     const winnerForDb = winnerUserId !== null && winnerUserId < 0 ? null : winnerUserId
     const endedAt = new Date()
     await this.matchRepo.update({ id: matchId }, { status: 'finished', winnerId: winnerForDb as unknown as number | null, endedAt })
@@ -597,6 +633,10 @@ export class MatchService implements OnModuleDestroy {
       await this.rankService.updateRankAfterMatch(aId, oppTierA, 'lose')
       await this.rankService.updateRankAfterMatch(bId, oppTierB, 'win')
     }
+    } catch (error) {
+      await this.handleSettlementFailure(matchId, room, ids, error)
+      return
+    }
     const endA = { matchId, winnerUserId, won: effectiveWinner === 1, forfeit: forfeitUserId !== undefined, forfeitReason: forfeitUserId !== undefined ? forfeitReason : null, opponentForfeit: forfeitUserId === bId, my: statsA, opponent: statsB }
     const endB = { matchId, winnerUserId, won: effectiveWinner === 2, forfeit: forfeitUserId !== undefined, forfeitReason: forfeitUserId !== undefined ? forfeitReason : null, opponentForfeit: forfeitUserId === aId, my: statsB, opponent: statsA }
     room.lastMatchEnd = endA
@@ -617,13 +657,22 @@ export class MatchService implements OnModuleDestroy {
     room.aiTimers.clear()
     const ids = [...room.players.keys()]
     const statsMap = new Map<number, PlayerStats>()
-    await Promise.all(ids.map(async uid => {
-      const sid = room.players.get(uid)!.sid
-      const s = await this.settlePlayer(sid)
-      statsMap.set(uid, s)
-    }))
+    try {
+      await Promise.all(ids.map(async uid => {
+        const sid = room.players.get(uid)!.sid
+        const s = await this.settlePlayerWithRetry(sid, uid)
+        statsMap.set(uid, s)
+      }))
+    } catch (error) {
+      await this.handleSettlementFailure(matchId, room, ids, error)
+      return
+    }
     // ranking: sort by score -> rare -> maxCombo, forfeit user forced last
-    const sorted = [...ids].sort((a, b) => {
+    let sorted: number[]
+    let ranks: Map<number, number>
+    let winnerId: number
+    try {
+      sorted = [...ids].sort((a, b) => {
       if (forfeitUserId !== undefined) {
         if (a === forfeitUserId) return 1
         if (b === forfeitUserId) return -1
@@ -633,10 +682,10 @@ export class MatchService implements OnModuleDestroy {
       if (sa.rareCount !== sb.rareCount) return sb.rareCount - sa.rareCount
       return sb.maxCombo - sa.maxCombo
     })
-    const ranks = new Map<number, number>()
+    ranks = new Map<number, number>()
     sorted.forEach((uid, idx) => ranks.set(uid, idx + 1))
     // winner is rank 1 (if forfeit, winner is first non-forfeit)
-    const winnerId = sorted[0]
+    winnerId = sorted[0]
     const winnerForDb = winnerId < 0 ? null : winnerId
     await this.matchRepo.update({ id: matchId }, { status: 'finished', winnerId: winnerForDb as unknown as number | null, endedAt: new Date() })
     const rows: MatchPlayerEntity[] = []
@@ -653,6 +702,10 @@ export class MatchService implements OnModuleDestroy {
       if (r === 1) await this.rankService.updateRankAfterMatch(uid, oppAvg, 'win')
       else await this.rankService.updateRankAfterMatch(uid, oppAvg, 'lose')
     }
+    } catch (error) {
+      await this.handleSettlementFailure(matchId, room, ids, error)
+      return
+    }
     // broadcast to each human
     for (const uid of ids) if (uid > 0) {
       const myStats = statsMap.get(uid)!
@@ -665,22 +718,80 @@ export class MatchService implements OnModuleDestroy {
     this.logger.log(`Match4p ${matchId} finished ranks ${sorted.join(',')}`)
   }
 
-  private async settlePlayer(sid: string): Promise<PlayerStats> {
+  private async handleSettlementFailure(
+    matchId: string,
+    room: MatchRoom,
+    userIds: number[],
+    error: unknown,
+  ): Promise<void> {
+    this.logger.error(
+      `Match ${matchId} settlement failed: ${(error as Error).message}`,
+    )
+    try {
+      await this.matchRepo.update(
+        { id: matchId },
+        { status: 'error', endedAt: new Date() },
+      )
+    } catch (updateError) {
+      this.logger.error(
+        `Match ${matchId} failure status update failed: ${(updateError as Error).message}`,
+      )
+    }
+    for (const userId of userIds) {
+      this.broadcastToUser(userId, 'match_error', {
+        matchId,
+        message: '对局结算失败，请返回大厅重试',
+      })
+      if (userId > 0) this.playerMatch.delete(userId)
+    }
+    if (room.ticker) clearInterval(room.ticker)
+    for (const timer of room.aiTimers.values()) clearTimeout(timer)
+    room.aiTimers.clear()
+    for (const player of room.players.values()) {
+      if (player.disconnectTimer) clearTimeout(player.disconnectTimer)
+    }
+    this.rooms.delete(matchId)
+  }
+
+  private async settlePlayerWithRetry(
+    sid: string,
+    userId: number,
+  ): Promise<PlayerStats> {
+    let lastError: unknown = new Error('对局结算失败')
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await this.settlePlayer(sid, userId)
+      } catch (error) {
+        lastError = error
+        this.logger.warn(
+          `settle player ${sid} failed (attempt ${attempt + 1}/3): ${(error as Error).message}`,
+        )
+        if (attempt < 2) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 100 * (attempt + 1)))
+        }
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error('对局结算失败')
+  }
+
+  private async settlePlayer(sid: string, userId: number): Promise<PlayerStats> {
     const isAi = await this.redis.hget(`match_session:${sid}`, 'isAi')
     if (isAi === '1') {
-      try {
-        const sess = await this.redis.hgetall(`match_session:${sid}`)
-        const score = parseInt(sess.score || '0', 10)
-        const maxCombo = parseInt(sess.maxCombo || '0', 10)
-        // rareCount approximate from found set not needed for AI tie-break detail; estimate 0
-        return { score, rareCount: 0, maxCombo, foundWords: [] }
-      } catch { return { score: 0, rareCount: 0, maxCombo: 0, foundWords: [] } }
+      const sess = await this.redis.hgetall(`match_session:${sid}`)
+      const score = parseInt(sess.score || '0', 10)
+      const maxCombo = parseInt(sess.maxCombo || '0', 10)
+      return { score, rareCount: 0, maxCombo, foundWords: [] }
     }
-    try {
-      const res = await this.gameService.endGame(sid)
-      const rareCount = res.foundWords.filter(f => f.rarity === 'idiom' || f.rarity === 'rare').length
-      return { score: res.score, rareCount, maxCombo: res.maxCombo, foundWords: res.foundWords }
-    } catch { return { score: 0, rareCount: 0, maxCombo: 0, foundWords: [] } }
+    const res = await this.gameService.endGame(userId, sid)
+    const rareCount = res.foundWords.filter(
+      (word) => word.rarity === 'idiom' || word.rarity === 'rare',
+    ).length
+    return {
+      score: res.score,
+      rareCount,
+      maxCombo: res.maxCombo,
+      foundWords: res.foundWords,
+    }
   }
 
   // ===== 断线重连 =====
@@ -698,8 +809,15 @@ export class MatchService implements OnModuleDestroy {
       const p = r?.players.get(userId)
       if (r && p && !p.clientConnected && r.status !== 'finished') {
         this.logger.warn(`Match ${matchId}: user ${userId} disconnected > ${DISCONNECT_GRACE_MS}ms, forfeit`)
-        if (r.type === 'pvp_4p') void this.finishMatch4p(matchId, userId, 'disconnect')
-        else void this.finishMatch(matchId, userId, 'disconnect')
+        if (r.type === 'pvp_4p') {
+          void this.finishMatch4p(matchId, userId, 'disconnect').catch((error: unknown) => {
+            this.logger.error(`match ${matchId} settlement failed: ${(error as Error).message}`)
+          })
+        } else {
+          void this.finishMatch(matchId, userId, 'disconnect').catch((error: unknown) => {
+            this.logger.error(`match ${matchId} settlement failed: ${(error as Error).message}`)
+          })
+        }
       }
     }, DISCONNECT_GRACE_MS)
   }
@@ -760,34 +878,49 @@ export class MatchService implements OnModuleDestroy {
     const t = setTimeout(async () => {
       if (room.status !== 'playing') return
       const sid = room.players.get(aiId)!.sid
-      const foundKey = `match_session:${sid}:found`
-      const isDup = await this.redis.sismember(foundKey, entry.word)
-      if (isDup) {
-        // 重复词不计分，直接进入下一轮
+      const sessionKey = `match_session:${sid}`
+      const foundKey = `${sessionKey}:found`
+      let raw: unknown
+      try {
+        raw = await this.redis.eval(
+          SUBMIT_WORD_SCRIPT,
+          3,
+          sessionKey,
+          foundKey,
+          `${sessionKey}:end-lock`,
+          entry.word,
+          entry.score.toString(),
+          Date.now().toString(),
+          COMBO_WINDOW_MS.toString(),
+          MAX_COMBO.toString(),
+          '0',
+          '0',
+          SESSION_TTL.toString(),
+        )
+      } catch (error) {
+        this.logger.warn(`AI submit failed for ${sid}: ${(error as Error).message}`)
         this.startAiDriving(room, aiId)
         return
       }
-      const sess = await this.redis.hgetall(`match_session:${sid}`)
-      const lastAt = parseInt(sess.lastWordAt || '0', 10)
-      const now = Date.now()
-      let combo = 0
-      if (lastAt > 0 && now - lastAt <= 10000) combo = Math.min(parseInt(sess.combo || '0', 10) + 1, 10)
-      let bonus = 0
-      if (combo >= 9) bonus = 3
-      else if (combo >= 6) bonus = 2
-      else if (combo >= 3) bonus = 1
-      const baseScore = calcScore(entry.length, entry.rarity as Rarity)
-      const scoreDelta = baseScore + bonus
-      const curScore = parseInt(sess.score || '0', 10)
-      const curComboScore = parseInt(sess.comboScore || '0', 10)
-      const newScore = curScore + scoreDelta
-      const newMaxCombo = Math.max(parseInt(sess.maxCombo || '0', 10), combo)
-      await this.redis.pipeline()
-        .sadd(foundKey, entry.word)
-        .hset(`match_session:${sid}`, { score: newScore.toString(), combo: combo.toString(), maxCombo: newMaxCombo.toString(), lastWordAt: now.toString(), comboScore: (curComboScore + bonus).toString() })
-        .expire(foundKey, 600)
-        .exec()
-      await this.broadcastScores(room, true)
+      const values = Array.isArray(raw) ? raw : []
+      const status = String(values[0] ?? '')
+      if (status === 'duplicate') {
+        this.startAiDriving(room, aiId)
+        return
+      }
+      if (status !== 'ok') {
+        if (status === 'settling' || status === 'settled' || status === 'expired' || status === 'missing') {
+          return
+        }
+        this.logger.warn(`AI submit failed for ${sid}: ${status || 'empty response'}`)
+        this.startAiDriving(room, aiId)
+        return
+      }
+      try {
+        await this.broadcastScores(room, true)
+      } catch (error) {
+        this.logger.warn(`AI score broadcast failed for ${sid}: ${(error as Error).message}`)
+      }
       this.startAiDriving(room, aiId)
     }, delay)
     room.aiTimers.set(aiId, t)

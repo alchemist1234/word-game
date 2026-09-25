@@ -104,6 +104,19 @@ export class ItemService {
     const session = await this.redis.hgetall(`match_session:${matchSessionId}`)
     if (!session || !session.grid) throw new NotFoundException('会话不存在或已过期')
     if (session.userId !== userId.toString()) throw new BadRequestException('会话不属于当前用户')
+    const startedAt = parseInt(session.startedAt || '0', 10)
+    const duration = parseInt(session.duration || '0', 10)
+    const fallbackDeadline =
+      startedAt > 0 && duration > 0
+        ? startedAt + duration * 1000
+        : 0
+    const deadlineAt = parseInt(
+      session.deadlineAt || String(fallbackDeadline),
+      10,
+    )
+    if (deadlineAt > 0 && Date.now() > deadlineAt) {
+      throw new BadRequestException('对局已结束')
+    }
     const mode = this.getMode(session)
     if (!cfg.allowedModes.includes(mode)) {
       // For pvp, shuffle/double allow both 1v1 and 4p: check if mode is pvp and config allows either
@@ -178,7 +191,7 @@ export class ItemService {
           }
         }
         if (!hintWord) {
-          // fallback: any potential not found
+          // fallback: use an unrecorded potential word
           const potential = session.potentialWords ? (JSON.parse(session.potentialWords) as string[]) : []
           for (const w of potential) {
             if (!foundSet.has(w)) {
@@ -230,9 +243,24 @@ export class ItemService {
       }
       case 'freeze': {
         const seconds = (cfg.params?.seconds as number) ?? 10
-        const freezeUntil = Date.now() + seconds * 1000
+        const now = Date.now()
+        const freezeUntil = now + seconds * 1000
+        const startedAt = parseInt(session.startedAt || '0', 10)
+        const duration = parseInt(session.duration || '0', 10)
+        const fallbackDeadline =
+          startedAt > 0 && duration > 0
+            ? startedAt + duration * 1000
+            : 0
+        const currentDeadline = parseInt(
+          session.deadlineAt || String(fallbackDeadline),
+          10,
+        )
+        const deadlineBase = currentDeadline > now ? currentDeadline : now
         const lastWordAt = parseInt(session.lastWordAt || '0', 10)
-        const updates: Record<string, string> = { freezeUntil: freezeUntil.toString() }
+        const updates: Record<string, string> = {
+          freezeUntil: freezeUntil.toString(),
+          deadlineAt: (deadlineBase + seconds * 1000).toString(),
+        }
         // 冻结期间连击计时也暂停：延长 lastWordAt 使 combo 窗口不受冻结消耗
         if (lastWordAt > 0) {
           updates.lastWordAt = (lastWordAt + seconds * 1000).toString()

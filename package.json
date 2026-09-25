@@ -7,7 +7,9 @@
     "doc": "doc"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "npm --prefix server test && npm --prefix client test",
+    "typecheck": "npm --prefix server run typecheck && npm --prefix client run typecheck",
+    "verify": "npm run typecheck && npm test && npm --prefix server run build && npm --prefix client run build:h5 && npm --prefix client run build:mp-weixin"
   },
   "keywords": [],
   "type": "commonjs",

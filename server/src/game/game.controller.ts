@@ -27,12 +27,23 @@ export class GameController {
   }
 
   @Post('word')
-  submitWord(@Body() dto: SubmitWordDto) {
-    return this.gameService.submitWord(dto.matchSessionId, dto.word, dto.cells)
+  submitWord(
+    @Body() dto: SubmitWordDto,
+    @Req() req: { user: { userId: number } },
+  ) {
+    return this.gameService.submitWord(
+      req.user.userId,
+      dto.matchSessionId,
+      dto.word,
+      dto.cells,
+    )
   }
 
   @Post('end')
-  endGame(@Body() dto: EndGameDto) {
-    return this.gameService.endGame(dto.matchSessionId)
+  endGame(
+    @Body() dto: EndGameDto,
+    @Req() req: { user: { userId: number } },
+  ) {
+    return this.gameService.endGame(req.user.userId, dto.matchSessionId)
   }
 }

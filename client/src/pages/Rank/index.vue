@@ -15,7 +15,9 @@ async function load() {
     const [r, e] = await Promise.all([fetchRankMe(), fetchEconomy()])
     rank.value = r
     economy.value = e
-  } catch {}
+  } catch (error: unknown) {
+    console.warn('[Rank] load failed', error)
+  }
   loading.value = false
 }
 onShow(load)

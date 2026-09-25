@@ -270,7 +270,9 @@ onBackPress(() => {
             void cancelMatchQueue()
           } else {
             // 主动离开：服务端立即结束对局并判对方胜利（不管当前得分）
-            void abandonMatch().catch(() => {})
+            void abandonMatch().catch((error: unknown) => {
+              console.warn('[Battle] abandon failed', error)
+            })
           }
           store.resetMatch()
           uni.navigateBack()

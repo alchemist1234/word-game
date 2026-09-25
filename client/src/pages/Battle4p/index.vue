@@ -45,7 +45,9 @@ onLoad(async () => {
           }
         }
       }
-    } catch {}
+    } catch (error: unknown) {
+      console.warn('[Battle4p] queue poll failed', error)
+    }
   }, 1000)
 })
 
@@ -55,7 +57,7 @@ function stopQueue() {
 }
 async function onCancel() {
   stopQueue()
-  try { await cancelMatchQueue(4) } catch {}
+  try { await cancelMatchQueue(4) } catch (error: unknown) { console.warn('[Battle4p] cancel failed', error) }
   store.clearBattle4pState()
   uni.navigateBack()
 }
@@ -154,7 +156,9 @@ onBackPress(() => {
       success: (res) => {
         if (res.confirm) {
           if (queuing.value) void cancelMatchQueue(4)
-          else void abandonMatch().catch(() => {})
+          else void abandonMatch().catch((error: unknown) => {
+            console.warn('[Battle4p] abandon failed', error)
+          })
           store.clearBattle4pState()
           uni.navigateBack()
         }

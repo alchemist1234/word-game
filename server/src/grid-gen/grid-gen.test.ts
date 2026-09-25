@@ -251,8 +251,10 @@ describe('generateGrid hard', () => {
     for (let i = 0; i < 10; i++) {
       const g = generateGrid('hard', testDict, trie)
       expect(g.targetWords.length).toBeGreaterThanOrEqual(3)
+      expect(g.potentialCount).toBeGreaterThanOrEqual(g.targetWords.length)
       for (const w of g.targetWords) {
         expect(canFindWord(g.grid, w)).toBe(true)
+        expect(g.potentialWords).toContain(w)
       }
     }
   })

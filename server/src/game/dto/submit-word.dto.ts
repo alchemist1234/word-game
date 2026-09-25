@@ -1,11 +1,13 @@
-import { IsString, IsArray, ValidateNested, IsInt } from 'class-validator'
+import { IsString, IsArray, ValidateNested, IsInt, Min } from 'class-validator'
 import { Type } from 'class-transformer'
 
 export class CellPosDto {
   @IsInt()
+  @Min(0)
   row!: number
 
   @IsInt()
+  @Min(0)
   col!: number
 }
 

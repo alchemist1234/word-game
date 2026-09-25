@@ -16,9 +16,4 @@ export class AchievementController {
   claim(@Body() body: { achievementId: string }, @Req() req: { user: { userId: number } }) {
     return this.service.claim(req.user.userId, body.achievementId)
   }
-
-  @Post('check')
-  check(@Body() body: { event: string; payload?: Record<string, unknown> }, @Req() req: { user: { userId: number } }) {
-    return this.service.check(req.user.userId, body.event, body.payload ?? {}).then(() => ({ ok: true }))
-  }
 }

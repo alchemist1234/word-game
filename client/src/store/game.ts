@@ -462,6 +462,16 @@ export const useGameStore = defineStore('game', () => {
 
   /** WebSocket 消息分发 */
   function handleWsMessage(msg: WsMessage) {
+    if (msg.event === 'match_error') {
+      const d = msg.data as { matchId?: string; message?: string }
+      errorMsg.value = d.message ?? '对局结算失败，请返回大厅重试'
+      matchPhase.value = 'finished'
+      phase.value = 'idle'
+      matchRemaining.value = 0
+      battle4pPhase.value = 'finished'
+      battle4pRemaining.value = 0
+      return
+    }
     if (msg.event === 'word_result') {
       handleWordResult(msg.data as SubmitWordResponse)
       return
@@ -571,10 +581,21 @@ export const useGameStore = defineStore('game', () => {
       return
     }
     if (msg.event === 'match_end') {
-      matchEnd.value = msg.data as {
+      const data = msg.data as {
         winnerUserId: number | null
+        forfeit?: boolean
+        forfeitReason?: 'abandon' | 'disconnect' | null
+        opponentForfeit?: boolean
         my: MatchPlayerView
         opponent: MatchPlayerView
+      }
+      matchEnd.value = {
+        winnerUserId: data.winnerUserId,
+        forfeit: data.forfeit ?? false,
+        forfeitReason: data.forfeitReason ?? null,
+        opponentForfeit: data.opponentForfeit ?? false,
+        my: data.my,
+        opponent: data.opponent,
       }
       matchPhase.value = 'finished'
       phase.value = 'idle'
@@ -696,7 +717,10 @@ export const useGameStore = defineStore('game', () => {
   /** 离开对局页清理：未结算时重置（再次进入重新开始），已结算保留数据给结算页 */
   function abandon() {
     clearTimer()
-    if (phase.value === 'playing') {
+    const shouldClear =
+      phase.value === 'playing' ||
+      (phase.value === 'idle' && (matchMode.value || battle4pMode.value))
+    if (shouldClear) {
       phase.value = 'idle'
       matchSessionId.value = ''
       grid.value = []
@@ -763,12 +787,16 @@ export const useGameStore = defineStore('game', () => {
   async function refreshEconomy() {
     try {
       economy.value = await fetchEconomy()
-    } catch {}
+    } catch (error: unknown) {
+      console.warn('[store] refresh economy failed', error)
+    }
   }
   async function refreshRank() {
     try {
       rankInfo.value = await fetchRankMe()
-    } catch {}
+    } catch (error: unknown) {
+      console.warn('[store] refresh rank failed', error)
+    }
   }
 
   return {

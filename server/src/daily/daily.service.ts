@@ -117,7 +117,11 @@ export class DailyService implements OnModuleInit {
       if (rank === 1) coins = 500
       else if (rank <= 10) coins = 200
       else coins = 100
-      await this.userRepo.increment({ id: entries[i].userId }, 'coins', coins).catch(() => {})
+      await this.userRepo
+        .increment({ id: entries[i].userId }, 'coins', coins)
+        .catch((error: unknown) => {
+          this.logger.warn(`daily reward ${entries[i].userId} failed: ${String(error)}`)
+        })
     }
     // archive snapshots
     for (let i = 0; i < entries.length; i++) {
@@ -167,7 +171,9 @@ export class DailyService implements OnModuleInit {
             rank,
           }),
         )
-      } catch {}
+      } catch (error) {
+        this.logger.warn(`season snapshot ${e.userId} failed: ${(error as Error).message}`)
+      }
     }
     if (entries.length > 0) await this.redis.del(lbKey)
     this.logger.log(`Settled season ${monthStr} with ${entries.length} entries`)
@@ -281,7 +287,7 @@ export class DailyService implements OnModuleInit {
         foundWords: [],
       }
     }
-    const result = await this.gameService.endGame(matchSessionId)
+    const result = await this.gameService.endGame(userId, matchSessionId)
     const attempt = this.attemptRepo.create({
       date: today,
       userId,
@@ -316,6 +322,8 @@ export class DailyService implements OnModuleInit {
       if (curNum === null || score > curNum) {
         await this.redis.zadd(key, score.toString(), userId.toString())
       }
-    } catch {}
+    } catch (error) {
+      this.logger.warn(`leaderboard update ${key} failed: ${(error as Error).message}`)
+    }
   }
 }

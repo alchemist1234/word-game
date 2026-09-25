@@ -47,8 +47,9 @@ async function onBuy(it: ItemConfig) {
     await purchaseItem(it.id, 1)
     uni.showToast({ title: '购买成功', icon: 'success' })
     await load()
-  } catch (e: any) {
-    uni.showToast({ title: e?.message || '购买失败', icon: 'none' })
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : '购买失败'
+    uni.showToast({ title: message, icon: 'none' })
   }
 }
 

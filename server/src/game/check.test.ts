@@ -97,6 +97,17 @@ describe('validatePath', () => {
     ]
     expect(validatePath(cells).valid).toBe(false)
   })
+  it('拒绝越界坐标', () => {
+    expect(validatePath([{ row: -1, col: 0 }, { row: 0, col: 0 }], 3)).toEqual({
+      valid: false,
+      reason: 'path_invalid',
+    })
+    expect(validatePath([{ row: 0, col: 0 }, { row: 0, col: 3 }], 3)).toEqual({
+      valid: false,
+      reason: 'path_invalid',
+    })
+  })
+
   it('成语长度路径合法', () => {
     const cells: CellPos[] = [
       { row: 0, col: 0 }, { row: 0, col: 1 },

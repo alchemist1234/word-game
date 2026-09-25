@@ -1,10 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common'
-import { InjectRepository } from '@nestjs/typeorm'
-import { Repository } from 'typeorm'
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm'
+import { DataSource, Repository } from 'typeorm'
 import { UserAchievementEntity } from './user-achievement.entity'
 import { UserFoundWordEntity } from '../user/user-found-word.entity'
 import { UserEntity } from '../user/user.entity'
-import { EconomyService } from '../economy/economy.service'
 import achievementsJson from '../../data/achievements.json'
 
 interface AchievementConfig {
@@ -26,7 +25,7 @@ export class AchievementService {
     @InjectRepository(UserAchievementEntity) private readonly repo: Repository<UserAchievementEntity>,
     @InjectRepository(UserFoundWordEntity) private readonly foundRepo: Repository<UserFoundWordEntity>,
     @InjectRepository(UserEntity) private readonly userRepo: Repository<UserEntity>,
-    private readonly economyService: EconomyService,
+    @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
   getConfig(): AchievementConfig[] {
@@ -102,24 +101,68 @@ export class AchievementService {
           met = false
       }
       if (met) {
-        const entity = this.repo.create({ userId, achievementId: ach.id, claimed: true })
-        await this.repo.save(entity)
-        if (ach.reward.coins) await this.economyService.addCoins(userId, ach.reward.coins)
-        if (ach.reward.diamonds) await this.economyService.addDiamonds(userId, ach.reward.diamonds)
-        this.logger.log(`Achievement unlocked: user ${userId} -> ${ach.id}`)
+        try {
+          await this.dataSource.transaction(async (manager) => {
+            const existing = await manager.findOne(UserAchievementEntity, {
+              where: { userId, achievementId: ach.id },
+            })
+            if (existing) return
+            const entity = manager.create(UserAchievementEntity, {
+              userId,
+              achievementId: ach.id,
+              claimed: true,
+            })
+            await manager.save(entity)
+            if (ach.reward.coins) {
+              await manager.increment(UserEntity, { id: userId }, 'coins', ach.reward.coins)
+            }
+            if (ach.reward.diamonds) {
+              await manager.increment(
+                UserEntity,
+                { id: userId },
+                'diamonds',
+                ach.reward.diamonds,
+              )
+            }
+          })
+          this.logger.log(`Achievement unlocked: user ${userId} -> ${ach.id}`)
+        } catch (error) {
+          // 唯一键竞争表示另一请求已完成；其他错误继续向上抛出以支持补偿重试。
+          const raced = await this.repo.findOne({
+            where: { userId, achievementId: ach.id },
+          })
+          if (!raced) throw error
+        }
       }
     }
   }
 
   async claim(userId: number, achievementId: string): Promise<{ ok: boolean }> {
-    const row = await this.repo.findOne({ where: { userId, achievementId } })
-    if (!row) throw new Error('成就未解锁')
-    if (row.claimed) return { ok: true }
-    row.claimed = true
-    await this.repo.save(row)
-    const cfg = ACHIEVEMENTS.find((a) => a.id === achievementId)
-    if (cfg?.reward.coins) await this.economyService.addCoins(userId, cfg.reward.coins)
-    if (cfg?.reward.diamonds) await this.economyService.addDiamonds(userId, cfg.reward.diamonds)
+    await this.dataSource.transaction(async (manager) => {
+      const row = await manager.findOne(UserAchievementEntity, {
+        where: { userId, achievementId },
+      })
+      if (!row) throw new Error('成就未解锁')
+      if (row.claimed) return
+      const claimed = await manager.update(
+        UserAchievementEntity,
+        { userId, achievementId, claimed: false },
+        { claimed: true },
+      )
+      if (claimed.affected === 0) return
+      const cfg = ACHIEVEMENTS.find((a) => a.id === achievementId)
+      if (cfg?.reward.coins) {
+        await manager.increment(UserEntity, { id: userId }, 'coins', cfg.reward.coins)
+      }
+      if (cfg?.reward.diamonds) {
+        await manager.increment(
+          UserEntity,
+          { id: userId },
+          'diamonds',
+          cfg.reward.diamonds,
+        )
+      }
+    })
     return { ok: true }
   }
 }

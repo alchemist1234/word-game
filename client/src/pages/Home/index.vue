@@ -9,8 +9,12 @@ const economy = ref<{ coins: number; diamonds: number; stamina: number; maxStami
 const rank = ref<{ rankTier: number; rankScore: number } | null>(null)
 
 function loadEconomy() {
-  fetchEconomy().then((r) => { economy.value = r }).catch(() => {})
-  fetchRankMe().then((r) => { rank.value = r }).catch(() => {})
+  fetchEconomy().then((r) => { economy.value = r }).catch((error: unknown) => {
+    console.warn('[Home] economy load failed', error)
+  })
+  fetchRankMe().then((r) => { rank.value = r }).catch((error: unknown) => {
+    console.warn('[Home] rank load failed', error)
+  })
 }
 onShow(loadEconomy)
 

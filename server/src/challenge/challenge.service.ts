@@ -183,7 +183,7 @@ export class ChallengeService {
       }
     }
 
-    const result = await this.gameService.endGame(matchSessionId)
+    const result = await this.gameService.endGame(userId, matchSessionId)
     const beat = result.score > ch.challengerScore
     const attempt = this.attemptRepo.create({
       challengeId,
