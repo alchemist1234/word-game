@@ -38,7 +38,7 @@ export class UserEntity {
   @Column({ type: 'int', default: 0 })
   diamonds!: number
 
-  @Column({ type: 'int', default: 20 })
+  @Column({ type: 'int', default: 5 })
   stamina!: number
 
   @Column({ type: 'timestamptz', default: () => 'now()' })

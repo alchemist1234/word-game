@@ -80,6 +80,7 @@ export class AiService {
     if (cfg.missRateByRarity && rarity) {
       base = cfg.missRateByRarity[rarity] ?? base
     }
+    if (base <= 0) return false
     if (elapsedSec !== undefined && elapsedSec >= 0) {
       const k = 0.5
       const cap = 0.95

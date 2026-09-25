@@ -20,6 +20,8 @@ import { MatchPlayerEntity } from './match-player.entity'
 import { decideWinner, type PlayerStats } from './match-decision'
 import { AiService } from '../ai/ai.service'
 import { RankService } from '../rank/rank.service'
+import { AchievementService } from '../achievement/achievement.service'
+import { EconomyService } from '../economy/economy.service'
 import { SUBMIT_WORD_SCRIPT } from '../game/redis-scripts'
 
 const QUEUE_TIMEOUT_MS = 30000
@@ -30,6 +32,42 @@ const MATCH_TIERS = [1, 2, 3, 4, 5, 6, 7]
 const SESSION_TTL = 600
 const COMBO_WINDOW_MS = 10000
 const MAX_COMBO = 10
+const QUEUE_LOCK_TTL_SECONDS = 10
+type MatchMode = 'casual' | 'ranked'
+
+const RELEASE_QUEUE_LOCK_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+`
+
+const ENQUEUE_QUEUE_SCRIPT = `
+if redis.call('EXISTS', KEYS[2]) == 1 then
+  return 0
+end
+redis.call('RPUSH', KEYS[1], ARGV[1])
+redis.call('HSET', KEYS[2], 'tier', ARGV[2], 'enqueuedAt', ARGV[3], 'mode', ARGV[4])
+return 1
+`
+
+const CLAIM_QUEUE_META_SCRIPT = `
+local token = redis.call('HGET', KEYS[1], 'claimToken')
+local claimedAt = tonumber(redis.call('HGET', KEYS[1], 'claimedAt'))
+if token and claimedAt and tonumber(ARGV[2]) - claimedAt < tonumber(ARGV[3]) then
+  return 0
+end
+redis.call('HSET', KEYS[1], 'claimToken', ARGV[1], 'claimedAt', ARGV[2])
+return 1
+`
+
+const RELEASE_QUEUE_META_SCRIPT = `
+if redis.call('HGET', KEYS[1], 'claimToken') == ARGV[1] then
+  redis.call('HDEL', KEYS[1], 'claimToken', 'claimedAt')
+  return 1
+end
+return 0
+`
 
 interface RoomPlayer {
   sid: string
@@ -42,6 +80,7 @@ interface RoomPlayer {
 interface MatchRoom {
   matchId: string
   type: 'pvp_1v1' | 'pvp_4p'
+  mode: MatchMode
   grid: string[][]
   size: number
   duration: number
@@ -64,7 +103,6 @@ export class MatchService implements OnModuleDestroy {
   private readonly playerMatch = new Map<number, string>()
   private readonly userClients = new Map<number, WebSocket>()
   private aiIdSeq = -1
-  private readonly queueLocks = new Set<string>()
 
   registerClient(userId: number, client: WebSocket): void {
     this.userClients.set(userId, client)
@@ -90,7 +128,49 @@ export class MatchService implements OnModuleDestroy {
     @InjectRepository(MatchPlayerEntity) private readonly matchPlayerRepo: Repository<MatchPlayerEntity>,
     private readonly aiService: AiService,
     private readonly rankService: RankService,
+    private readonly achievementService: AchievementService,
+    private readonly economyService: EconomyService,
   ) {}
+
+  private normalizeMode(mode?: string): MatchMode {
+    return mode === 'ranked' ? 'ranked' : 'casual'
+  }
+
+  private async acquireQueueLock(key: string): Promise<string | null> {
+    const token = uuidv4()
+    const acquired = await this.redis.set(
+      key,
+      token,
+      'EX',
+      QUEUE_LOCK_TTL_SECONDS,
+      'NX',
+    )
+    return acquired === 'OK' ? token : null
+  }
+
+  private async releaseQueueLock(key: string, token: string): Promise<void> {
+    try {
+      await this.redis.eval(RELEASE_QUEUE_LOCK_SCRIPT, 1, key, token)
+    } catch (error) {
+      this.logger.warn(`release queue lock failed: ${(error as Error).message}`)
+    }
+  }
+
+  private async claimQueueUser(metaKey: string, token: string): Promise<boolean> {
+    const result = await this.redis.eval(
+      CLAIM_QUEUE_META_SCRIPT,
+      1,
+      metaKey,
+      token,
+      Date.now().toString(),
+      (30 * 1000).toString(),
+    )
+    return Number(result) === 1
+  }
+
+  private async releaseQueueUser(metaKey: string, token: string): Promise<void> {
+    await this.redis.eval(RELEASE_QUEUE_META_SCRIPT, 1, metaKey, token)
+  }
 
   onModuleDestroy(): void {
     for (const room of this.rooms.values()) {
@@ -104,6 +184,7 @@ export class MatchService implements OnModuleDestroy {
 
   async queue(userId: number, opts?: { size?: number; mode?: string }): Promise<{ status: string; matchId?: string }> {
     const size = opts?.size === 4 ? 4 : 2
+    const mode = this.normalizeMode(opts?.mode)
     const existing = this.playerMatch.get(userId)
     if (existing) {
       const room = this.rooms.get(existing)
@@ -115,18 +196,38 @@ export class MatchService implements OnModuleDestroy {
     const user = await this.userRepo.findOne({ where: { id: userId } })
     const tier = Math.min(Math.max(user?.rankTier ?? 1, 1), 7)
     if (size === 4) {
-      await this.redis.rpush(`match_queue_4p:${tier}`, userId.toString())
-      await this.redis.hset(`match_queue_4p_meta:${userId}`, { tier: tier.toString(), enqueuedAt: Date.now().toString(), mode: opts?.mode ?? 'casual' })
-      await this.tryPairQueue4p(tier)
+      const queueKey = `match_queue_4p:${mode}:${tier}`
+      const metaKey = `match_queue_4p_meta:${userId}`
+      await this.redis.eval(
+        ENQUEUE_QUEUE_SCRIPT,
+        2,
+        queueKey,
+        metaKey,
+        userId.toString(),
+        tier.toString(),
+        Date.now().toString(),
+        mode,
+      )
+      await this.tryPairQueue4p(tier, mode)
     } else {
-      await this.redis.rpush(`match_queue:${tier}`, userId.toString())
-      await this.redis.hset(`match_queue_meta:${userId}`, { tier: tier.toString(), enqueuedAt: Date.now().toString(), mode: opts?.mode ?? 'casual' })
-      await this.tryPairQueue(tier)
+      const queueKey = `match_queue:${mode}:${tier}`
+      const metaKey = `match_queue_meta:${userId}`
+      await this.redis.eval(
+        ENQUEUE_QUEUE_SCRIPT,
+        2,
+        queueKey,
+        metaKey,
+        userId.toString(),
+        tier.toString(),
+        Date.now().toString(),
+        mode,
+      )
+      await this.tryPairQueue(tier, mode)
     }
     return { status: 'queued' }
   }
 
-  async queueStatus(userId: number, opts?: { size?: number }): Promise<{
+  async queueStatus(userId: number, opts?: { size?: number; mode?: string }): Promise<{
     status: 'queued' | 'matched' | 'timeout'
     matchId?: string
     elapsedSec?: number
@@ -199,7 +300,8 @@ export class MatchService implements OnModuleDestroy {
   async cancelQueue(userId: number): Promise<{ cancelled: boolean }> {
     const meta = await this.redis.hgetall(`match_queue_meta:${userId}`)
     if (meta.tier) {
-      await this.redis.lrem(`match_queue:${meta.tier}`, 0, userId.toString())
+      const mode = this.normalizeMode(meta.mode)
+      await this.redis.lrem(`match_queue:${mode}:${meta.tier}`, 0, userId.toString())
       await this.redis.del(`match_queue_meta:${userId}`)
       return { cancelled: true }
     }
@@ -208,7 +310,8 @@ export class MatchService implements OnModuleDestroy {
   async cancelQueue4p(userId: number): Promise<{ cancelled: boolean }> {
     const meta = await this.redis.hgetall(`match_queue_4p_meta:${userId}`)
     if (meta.tier) {
-      await this.redis.lrem(`match_queue_4p:${meta.tier}`, 0, userId.toString())
+      const mode = this.normalizeMode(meta.mode)
+      await this.redis.lrem(`match_queue_4p:${mode}:${meta.tier}`, 0, userId.toString())
       await this.redis.del(`match_queue_4p_meta:${userId}`)
       return { cancelled: true }
     }
@@ -237,118 +340,146 @@ export class MatchService implements OnModuleDestroy {
 
   @Interval(1000)
   async scanQueues(): Promise<void> {
-    for (const tier of MATCH_TIERS) {
-      await this.tryPairQueue(tier)
-      await this.tryPairQueue4p(tier)
+    for (const mode of ['casual', 'ranked'] as const) {
+      for (const tier of MATCH_TIERS) {
+        await this.tryPairQueue(tier, mode)
+        await this.tryPairQueue4p(tier, mode)
+      }
     }
   }
 
-  private async tryPairQueue(tier: number): Promise<void> {
-    const lockKey = `1v1:${tier}`
-    if (this.queueLocks.has(lockKey)) return
-    this.queueLocks.add(lockKey)
+  private async tryPairQueue(tier: number, mode: MatchMode): Promise<void> {
+    const lockKey = `match-queue-lock:1v1:${mode}:${tier}`
+    const lockToken = await this.acquireQueueLock(lockKey)
+    if (!lockToken) return
+    const key = `match_queue:${mode}:${tier}`
+    const metaPrefix = 'match_queue_meta:'
     try {
-      const key = `match_queue:${tier}`
-    const ids = await this.redis.lrange(key, 0, -1)
-    if (ids.length >= 2) {
-      const picked: number[] = []
+      const ids = await this.redis.lrange(key, 0, -1)
+      const picked: Array<{ uid: number; idStr: string; token: string }> = []
       for (const idStr of ids) {
         if (picked.length >= 2) break
-        const uid = parseInt(idStr, 10)
-        const meta = await this.redis.hgetall(`match_queue_meta:${uid}`)
-        // if missing meta, treat as stale
-        if (!meta.tier) { await this.redis.lrem(key, 0, idStr); continue }
-        picked.push(uid)
-        await this.redis.lrem(key, 0, idStr)
+        const uid = Number.parseInt(idStr, 10)
+        if (!Number.isInteger(uid) || picked.some((entry) => entry.uid === uid)) continue
+        const metaKey = `${metaPrefix}${uid}`
+        const meta = await this.redis.hgetall(metaKey)
+        if (!meta.tier) {
+          await this.redis.lrem(key, 0, idStr)
+          continue
+        }
+        const token = uuidv4()
+        if (!(await this.claimQueueUser(metaKey, token))) continue
+        picked.push({ uid, idStr, token })
       }
-      if (picked.length < 2) {
-        for (const uid of picked) {
-          const meta = await this.redis.hgetall(`match_queue_meta:${uid}`)
-          if (meta.tier) await this.redis.rpush(key, uid.toString())
+      if (picked.length >= 2) {
+        const [a, b] = picked
+        try {
+          await this.setupMatch(a.uid, b.uid, mode)
+          await this.redis.lrem(key, 0, a.idStr)
+          await this.redis.lrem(key, 0, b.idStr)
+          await this.redis.del(`${metaPrefix}${a.uid}`, `${metaPrefix}${b.uid}`)
+        } catch (error) {
+          this.logger.warn(`setupMatch failed: ${(error as Error).message}`)
+          await this.releaseQueueUser(`${metaPrefix}${a.uid}`, a.token)
+          await this.releaseQueueUser(`${metaPrefix}${b.uid}`, b.token)
         }
         return
       }
-      const [a, b] = picked
-      await this.redis.del(`match_queue_meta:${a}`, `match_queue_meta:${b}`)
-      try { await this.setupMatch(a, b) } catch (e) {
-        this.logger.warn(`setupMatch failed: ${(e as Error).message}`)
-        await this.redis.rpush(key, a.toString(), b.toString())
-        await this.redis.hset(`match_queue_meta:${a}`, { tier: tier.toString(), enqueuedAt: Date.now().toString() })
-        await this.redis.hset(`match_queue_meta:${b}`, { tier: tier.toString(), enqueuedAt: Date.now().toString() })
-      }
-      return
-    }
-    if (ids.length === 1) {
-      const uid = parseInt(ids[0], 10)
-      const meta = await this.redis.hgetall(`match_queue_meta:${uid}`)
-      if (!meta.tier) { await this.redis.lrem(key, 0, ids[0]); return }
-      const elapsed = Date.now() - parseInt(meta.enqueuedAt || '0', 10)
-      if (elapsed > QUEUE_TIMEOUT_MS) {
-        await this.redis.lrem(key, 0, ids[0])
-        await this.redis.del(`match_queue_meta:${uid}`)
-        try { await this.setupMatchWithAi(uid) } catch (e) {
-          this.logger.warn(`setupMatchWithAi failed: ${(e as Error).message}`)
-          await this.redis.rpush(key, uid.toString())
-          await this.redis.hset(`match_queue_meta:${uid}`, { tier: tier.toString(), enqueuedAt: Date.now().toString() })
+      if (picked.length === 1) {
+        const entry = picked[0]
+        const metaKey = `${metaPrefix}${entry.uid}`
+        const meta = await this.redis.hgetall(metaKey)
+        const elapsed = Date.now() - Number.parseInt(meta.enqueuedAt || '0', 10)
+        if (elapsed > QUEUE_TIMEOUT_MS) {
+          try {
+            await this.setupMatchWithAi(entry.uid, mode)
+            await this.redis.lrem(key, 0, entry.idStr)
+            await this.redis.del(metaKey)
+          } catch (error) {
+            this.logger.warn(`setupMatchWithAi failed: ${(error as Error).message}`)
+            await this.releaseQueueUser(metaKey, entry.token)
+          }
+        } else {
+          await this.releaseQueueUser(metaKey, entry.token)
         }
+        return
       }
-    }
+      // 没有可 claim 的用户，或其他用户正在被 claim，保持队列不变。
+      for (const entry of picked) {
+        await this.releaseQueueUser(`${metaPrefix}${entry.uid}`, entry.token)
+      }
     } finally {
-      this.queueLocks.delete(lockKey)
+      await this.releaseQueueLock(lockKey, lockToken)
     }
   }
 
-  private async tryPairQueue4p(tier: number): Promise<void> {
-    const lockKey = `4p:${tier}`
-    if (this.queueLocks.has(lockKey)) return
-    this.queueLocks.add(lockKey)
+  private async tryPairQueue4p(tier: number, mode: MatchMode): Promise<void> {
+    const lockKey = `match-queue-lock:4p:${mode}:${tier}`
+    const lockToken = await this.acquireQueueLock(lockKey)
+    if (!lockToken) return
+    const key = `match_queue_4p:${mode}:${tier}`
+    const metaPrefix = 'match_queue_4p_meta:'
     try {
-      const key = `match_queue_4p:${tier}`
-    const ids = await this.redis.lrange(key, 0, -1)
-    if (ids.length === 0) return
-    if (ids.length >= 4) {
-      const picked: number[] = []
+      const ids = await this.redis.lrange(key, 0, -1)
+      const picked: Array<{ uid: number; idStr: string; token: string }> = []
       for (const idStr of ids) {
         if (picked.length >= 4) break
-        const uid = parseInt(idStr, 10)
-        const meta = await this.redis.hgetall(`match_queue_4p_meta:${uid}`)
-        if (!meta.tier) { await this.redis.lrem(key, 0, idStr); continue }
-        picked.push(uid); await this.redis.lrem(key, 0, idStr)
+        const uid = Number.parseInt(idStr, 10)
+        if (!Number.isInteger(uid) || picked.some((entry) => entry.uid === uid)) continue
+        const metaKey = `${metaPrefix}${uid}`
+        const meta = await this.redis.hgetall(metaKey)
+        if (!meta.tier) {
+          await this.redis.lrem(key, 0, idStr)
+          continue
+        }
+        const token = uuidv4()
+        if (!(await this.claimQueueUser(metaKey, token))) continue
+        picked.push({ uid, idStr, token })
       }
-      if (picked.length < 4) { for (const uid of picked) await this.redis.rpush(key, uid.toString()); return }
-      for (const uid of picked) await this.redis.del(`match_queue_4p_meta:${uid}`)
-      try { await this.setupMatch4p(picked) } catch (e) {
-        this.logger.warn(`setupMatch4p failed: ${(e as Error).message}`)
-        for (const uid of picked) { await this.redis.rpush(key, uid.toString()); await this.redis.hset(`match_queue_4p_meta:${uid}`, { tier: tier.toString(), enqueuedAt: Date.now().toString() }) }
+      if (picked.length >= 4) {
+        const userIds = picked.map((entry) => entry.uid)
+        try {
+          await this.setupMatch4p(userIds, undefined, mode)
+          for (const entry of picked) await this.redis.lrem(key, 0, entry.idStr)
+          for (const entry of picked) await this.redis.del(`${metaPrefix}${entry.uid}`)
+        } catch (error) {
+          this.logger.warn(`setupMatch4p failed: ${(error as Error).message}`)
+          for (const entry of picked) {
+            await this.releaseQueueUser(`${metaPrefix}${entry.uid}`, entry.token)
+          }
+        }
+        return
       }
-      return
-    }
-    // 1-3 waiting and timeout -> fill AI to 4
-    const firstMeta = await this.redis.hgetall(`match_queue_4p_meta:${parseInt(ids[0], 10)}`)
-    const elapsed = Date.now() - parseInt(firstMeta.enqueuedAt || '0', 10)
-    if (elapsed > QUEUE_TIMEOUT_MS) {
-      const picked: number[] = []
-      for (const idStr of ids) {
-        const uid = parseInt(idStr, 10)
-        const meta = await this.redis.hgetall(`match_queue_4p_meta:${uid}`)
-        if (!meta.tier) { await this.redis.lrem(key, 0, idStr); continue }
-        picked.push(uid); await this.redis.lrem(key, 0, idStr)
-      }
-      for (const uid of picked) await this.redis.del(`match_queue_4p_meta:${uid}`)
       if (picked.length === 0) return
-      // fill AI to 4
-      const avgTier = await this.avgTier(picked)
-      const aiLevel = this.aiService.levelForAvgTier(avgTier)
-      const needAi = 4 - picked.length
-      const aiIds: number[] = []
-      for (let i = 0; i < needAi; i++) aiIds.push(this.nextAiId())
-      try { await this.setupMatch4p([...picked, ...aiIds], new Map(aiIds.map(id => [id, aiLevel]))) } catch (e) {
-        this.logger.warn(`setupMatch4p AI fill failed: ${(e as Error).message}`)
-        for (const uid of picked) { await this.redis.rpush(key, uid.toString()); await this.redis.hset(`match_queue_4p_meta:${uid}`, { tier: tier.toString(), enqueuedAt: Date.now().toString() }) }
+      const firstMeta = await this.redis.hgetall(`${metaPrefix}${picked[0].uid}`)
+      const elapsed = Date.now() - Number.parseInt(firstMeta.enqueuedAt || '0', 10)
+      if (elapsed <= QUEUE_TIMEOUT_MS) {
+        for (const entry of picked) {
+          await this.releaseQueueUser(`${metaPrefix}${entry.uid}`, entry.token)
+        }
+        return
       }
-    }
+      const userIds = picked.map((entry) => entry.uid)
+      const avgTier = await this.avgTier(userIds)
+      const aiLevel = this.aiService.levelForAvgTier(avgTier)
+      const aiIds: number[] = []
+      for (let i = userIds.length; i < 4; i += 1) aiIds.push(this.nextAiId())
+      try {
+        await this.setupMatch4p(
+          [...userIds, ...aiIds],
+          new Map(aiIds.map((id) => [id, aiLevel])),
+          mode,
+        )
+        for (const entry of picked) await this.redis.lrem(key, 0, entry.idStr)
+        for (const entry of picked) await this.redis.del(`${metaPrefix}${entry.uid}`)
+      } catch (error) {
+        this.logger.warn(`setupMatch4p AI fill failed: ${(error as Error).message}`)
+        for (const entry of picked) {
+          await this.releaseQueueUser(`${metaPrefix}${entry.uid}`, entry.token)
+        }
+      }
     } finally {
-      this.queueLocks.delete(lockKey)
+      await this.releaseQueueLock(lockKey, lockToken)
     }
   }
 
@@ -364,15 +495,17 @@ export class MatchService implements OnModuleDestroy {
 
   // ===== 对局生命周期 =====
 
-  private async setupMatch(userIdA: number, userIdB: number): Promise<void> {
+  private async setupMatch(userIdA: number, userIdB: number, mode: MatchMode): Promise<void> {
     const gridEntity = await this.gridPoolService.acquire('standard')
     if (!gridEntity) throw new NotFoundException('暂无可用网格')
     const matchId = uuidv4()
     const sessionA = await this.gameService.createSessionFromGrid(gridEntity, userIdA, MATCH_DURATION, matchId)
     const sessionB = await this.gameService.createSessionFromGrid(gridEntity, userIdB, MATCH_DURATION, matchId)
-    await this.matchRepo.save(this.matchRepo.create({ id: matchId, type: 'pvp_1v1', gridSeed: sessionA.gridSeed, grid: gridEntity.grid, targetWords: gridEntity.targetWords, status: 'ongoing', winnerId: null, endedAt: null }))
+    await this.matchRepo.save(this.matchRepo.create({ id: matchId, type: 'pvp_1v1', mode, gridSeed: sessionA.gridSeed, grid: gridEntity.grid, targetWords: gridEntity.targetWords, status: 'ongoing', winnerId: null, endedAt: null }))
+    await this.redis.hset(`match_session:${sessionA.matchSessionId}`, { pvpType: 'pvp_1v1', matchMode: mode })
+    await this.redis.hset(`match_session:${sessionB.matchSessionId}`, { pvpType: 'pvp_1v1', matchMode: mode })
     const room: MatchRoom = {
-      matchId, type: 'pvp_1v1', grid: gridEntity.grid, size: gridEntity.size, duration: MATCH_DURATION,
+      matchId, type: 'pvp_1v1', mode, grid: gridEntity.grid, size: gridEntity.size, duration: MATCH_DURATION,
       players: new Map([[userIdA, { sid: sessionA.matchSessionId, clientConnected: true, isAi: false }], [userIdB, { sid: sessionB.matchSessionId, clientConnected: true, isAi: false }]]),
       status: 'countdown', remainingSec: MATCH_DURATION + COUNTDOWN_SEC, lastScores: new Map([[userIdA, 0], [userIdB, 0]]), aiTimers: new Map(), aiPools: new Map(), aiIndices: new Map(), aiCombo: new Map(),
     }
@@ -388,7 +521,7 @@ export class MatchService implements OnModuleDestroy {
     }, COUNTDOWN_SEC * 1000)
   }
 
-  private async setupMatchWithAi(userId: number): Promise<void> {
+  private async setupMatchWithAi(userId: number, mode: MatchMode): Promise<void> {
     const user = await this.userRepo.findOne({ where: { id: userId } })
     const tier = user?.rankTier ?? 1
     const aiLevel = this.aiService.levelForAvgTier(tier)
@@ -398,12 +531,13 @@ export class MatchService implements OnModuleDestroy {
     const matchId = uuidv4()
     const sessionHuman = await this.gameService.createSessionFromGrid(gridEntity, userId, MATCH_DURATION, matchId)
     const sessionAi = await this.gameService.createSessionFromGrid(gridEntity, aiId, MATCH_DURATION, matchId)
-    await this.redis.hset(`match_session:${sessionAi.matchSessionId}`, { isAi: '1', aiLevel })
-    await this.matchRepo.save(this.matchRepo.create({ id: matchId, type: 'pvp_1v1', gridSeed: sessionHuman.gridSeed, grid: gridEntity.grid, targetWords: gridEntity.targetWords, status: 'ongoing', winnerId: null, endedAt: null }))
+    await this.redis.hset(`match_session:${sessionHuman.matchSessionId}`, { pvpType: 'pvp_1v1', matchMode: mode })
+    await this.redis.hset(`match_session:${sessionAi.matchSessionId}`, { isAi: '1', aiLevel, pvpType: 'pvp_1v1', matchMode: mode })
+    await this.matchRepo.save(this.matchRepo.create({ id: matchId, type: 'pvp_1v1', mode, gridSeed: sessionHuman.gridSeed, grid: gridEntity.grid, targetWords: gridEntity.targetWords, status: 'ongoing', winnerId: null, endedAt: null }))
     const potentialWithRarity = JSON.parse(await this.redis.hget(`match_session:${sessionHuman.matchSessionId}`, 'potentialWordsWithRarity') ?? '[]') as Array<{ word: string; rarity: string; length: number }>
     const pool = this.aiService.buildCandidatePool(potentialWithRarity, aiLevel)
     const room: MatchRoom = {
-      matchId, type: 'pvp_1v1', grid: gridEntity.grid, size: gridEntity.size, duration: MATCH_DURATION,
+      matchId, type: 'pvp_1v1', mode, grid: gridEntity.grid, size: gridEntity.size, duration: MATCH_DURATION,
       players: new Map([[userId, { sid: sessionHuman.matchSessionId, clientConnected: true, isAi: false }], [aiId, { sid: sessionAi.matchSessionId, clientConnected: true, isAi: true, aiLevel }]]),
       status: 'countdown', remainingSec: MATCH_DURATION + COUNTDOWN_SEC, lastScores: new Map([[userId, 0], [aiId, 0]]), aiTimers: new Map(), aiPools: new Map([[aiId, pool]]), aiIndices: new Map([[aiId, 0]]), aiCombo: new Map([[aiId, 0]]),
     }
@@ -417,7 +551,7 @@ export class MatchService implements OnModuleDestroy {
     }, COUNTDOWN_SEC * 1000)
   }
 
-  private async setupMatch4p(userIds: number[], aiLevelMap?: Map<number, string>): Promise<void> {
+  private async setupMatch4p(userIds: number[], aiLevelMap?: Map<number, string>, mode: MatchMode = 'casual'): Promise<void> {
     const gridEntity = await this.gridPoolService.acquire('standard')
     if (!gridEntity) throw new NotFoundException('暂无可用网格')
     const matchId = uuidv4()
@@ -426,11 +560,13 @@ export class MatchService implements OnModuleDestroy {
       const s = await this.gameService.createSessionFromGrid(gridEntity, uid, MATCH_DURATION, matchId)
       if (uid < 0) {
         const lvl = aiLevelMap?.get(uid) ?? 'L3'
-        await this.redis.hset(`match_session:${s.matchSessionId}`, { isAi: '1', aiLevel: lvl })
+        await this.redis.hset(`match_session:${s.matchSessionId}`, { isAi: '1', aiLevel: lvl, pvpType: 'pvp_4p', matchMode: mode })
+      } else {
+        await this.redis.hset(`match_session:${s.matchSessionId}`, { pvpType: 'pvp_4p', matchMode: mode })
       }
       sessions.push({ userId: uid, sid: s.matchSessionId })
     }
-    await this.matchRepo.save(this.matchRepo.create({ id: matchId, type: 'pvp_4p', gridSeed: gridEntity.id, grid: gridEntity.grid, targetWords: gridEntity.targetWords, status: 'ongoing', winnerId: null, endedAt: null }))
+    await this.matchRepo.save(this.matchRepo.create({ id: matchId, type: 'pvp_4p', mode, gridSeed: gridEntity.id, grid: gridEntity.grid, targetWords: gridEntity.targetWords, status: 'ongoing', winnerId: null, endedAt: null }))
     const players = new Map<number, RoomPlayer>()
     const lastScores = new Map<number, number>()
     const aiPools = new Map<number, Array<{ word: string; rarity: string; length: number; score: number }>>()
@@ -450,7 +586,7 @@ export class MatchService implements OnModuleDestroy {
         this.playerMatch.set(userId, matchId)
       }
     }
-    const room: MatchRoom = { matchId, type: 'pvp_4p', grid: gridEntity.grid, size: gridEntity.size, duration: MATCH_DURATION, players, status: 'countdown', remainingSec: MATCH_DURATION + COUNTDOWN_SEC, lastScores, aiTimers: new Map(), aiPools, aiIndices, aiCombo }
+    const room: MatchRoom = { matchId, type: 'pvp_4p', mode, grid: gridEntity.grid, size: gridEntity.size, duration: MATCH_DURATION, players, status: 'countdown', remainingSec: MATCH_DURATION + COUNTDOWN_SEC, lastScores, aiTimers: new Map(), aiPools, aiIndices, aiCombo }
     this.rooms.set(matchId, room)
     // if AI-only? not possible (at least 1 human)
     this.logger.log(`Match4p ${matchId}: ${userIds.join(',')}`)
@@ -467,10 +603,10 @@ export class MatchService implements OnModuleDestroy {
 
   private sendMatchStart(room: MatchRoom, myUserId: number, mySid: string, opponent: UserEntity | null, aiId?: number, aiLevel?: string): void {
     if (aiId !== undefined) {
-      this.broadcastToUser(myUserId, 'match_start', { matchId: room.matchId, grid: room.grid, size: room.size, duration: room.duration, mySid, opponent: { nickname: `AI-${aiLevel}`, rankTier: 1 }, isAi: true, aiLevel })
+      this.broadcastToUser(myUserId, 'match_start', { matchId: room.matchId, mode: room.mode, grid: room.grid, size: room.size, duration: room.duration, mySid, opponent: { nickname: `AI-${aiLevel}`, rankTier: 1 }, isAi: true, aiLevel })
       return
     }
-    this.broadcastToUser(myUserId, 'match_start', { matchId: room.matchId, grid: room.grid, size: room.size, duration: room.duration, mySid, opponent: { nickname: opponent?.nickname ?? `玩家${opponent?.id ?? ''}`, rankTier: opponent?.rankTier ?? 1 } })
+    this.broadcastToUser(myUserId, 'match_start', { matchId: room.matchId, mode: room.mode, grid: room.grid, size: room.size, duration: room.duration, mySid, opponent: { nickname: opponent?.nickname ?? `玩家${opponent?.id ?? ''}`, rankTier: opponent?.rankTier ?? 1 } })
   }
   private sendMatchStart4p(room: MatchRoom, myUserId: number, mySid: string): void {
     const players: Array<{ userId: number; nickname: string; rankTier: number; isAi: boolean; aiLevel?: string }> = []
@@ -482,14 +618,14 @@ export class MatchService implements OnModuleDestroy {
       }
     }
     // enrich nicknames for humans asynchronously but send immediate
-    this.broadcastToUser(myUserId, 'match_start_4p', { matchId: room.matchId, grid: room.grid, size: room.size, duration: room.duration, mySid, players })
+    this.broadcastToUser(myUserId, 'match_start_4p', { matchId: room.matchId, mode: room.mode, grid: room.grid, size: room.size, duration: room.duration, mySid, players })
     // async enrich
     void (async () => {
       for (const p of players) if (!p.isAi) {
         const u = await this.userRepo.findOne({ where: { id: p.userId } })
         if (u) { p.nickname = u.nickname ?? p.nickname; p.rankTier = u.rankTier ?? 1 }
       }
-      this.broadcastToUser(myUserId, 'match_start_4p', { matchId: room.matchId, grid: room.grid, size: room.size, duration: room.duration, mySid, players })
+      this.broadcastToUser(myUserId, 'match_start_4p', { matchId: room.matchId, mode: room.mode, grid: room.grid, size: room.size, duration: room.duration, mySid, players })
     })()
   }
 
@@ -611,27 +747,47 @@ export class MatchService implements OnModuleDestroy {
       winnerUserId = effectiveWinner === 0 ? null : effectiveWinner === 1 ? aId : bId
     const winnerForDb = winnerUserId !== null && winnerUserId < 0 ? null : winnerUserId
     const endedAt = new Date()
-    await this.matchRepo.update({ id: matchId }, { status: 'finished', winnerId: winnerForDb as unknown as number | null, endedAt })
+    const statusUpdate = await this.matchRepo.update(
+      { id: matchId, status: 'ongoing' },
+      { status: 'finished', winnerId: winnerForDb as unknown as number | null, endedAt },
+    )
+    if (statusUpdate.affected !== 1) {
+      this.logger.warn(`Match ${matchId} already finalized by another worker`)
+      return
+    }
     const rankA = effectiveWinner === 2 ? 2 : 1
     const rankB = effectiveWinner === 1 ? 2 : 1
     const isAiA = aId < 0, isAiB = bId < 0
     const aiLevelA = pa.aiLevel ?? null, aiLevelB = pb.aiLevel ?? null
-    await this.matchPlayerRepo.save([
-      this.matchPlayerRepo.create({ matchId, userId: aId, score: statsA.score, rareCount: statsA.rareCount, maxCombo: statsA.maxCombo, rank: rankA, sid: pa.sid, isAi: isAiA, aiLevel: aiLevelA } as Partial<MatchPlayerEntity> as MatchPlayerEntity),
-      this.matchPlayerRepo.create({ matchId, userId: bId, score: statsB.score, rareCount: statsB.rareCount, maxCombo: statsB.maxCombo, rank: rankB, sid: pb.sid, isAi: isAiB, aiLevel: aiLevelB } as Partial<MatchPlayerEntity> as MatchPlayerEntity),
-    ])
-    // rank score update
-    const oppTierA = isAiB ? 1 : (await this.userRepo.findOne({ where: { id: bId } }))?.rankTier ?? 1
-    const oppTierB = isAiA ? 1 : (await this.userRepo.findOne({ where: { id: aId } }))?.rankTier ?? 1
-    if (effectiveWinner === 0) {
-      await this.rankService.updateRankAfterMatch(aId, oppTierA, 'draw')
-      await this.rankService.updateRankAfterMatch(bId, oppTierB, 'draw')
-    } else if (effectiveWinner === 1) {
-      await this.rankService.updateRankAfterMatch(aId, oppTierA, 'win')
-      await this.rankService.updateRankAfterMatch(bId, oppTierB, 'lose')
-    } else {
-      await this.rankService.updateRankAfterMatch(aId, oppTierA, 'lose')
-      await this.rankService.updateRankAfterMatch(bId, oppTierB, 'win')
+    await this.matchPlayerRepo.upsert([
+      { matchId, userId: aId, score: statsA.score, rareCount: statsA.rareCount, maxCombo: statsA.maxCombo, rank: rankA, sid: pa.sid, isAi: isAiA, aiLevel: aiLevelA },
+      { matchId, userId: bId, score: statsB.score, rareCount: statsB.rareCount, maxCombo: statsB.maxCombo, rank: rankB, sid: pb.sid, isAi: isAiB, aiLevel: aiLevelB },
+    ], ['matchId', 'sid'])
+    // 只有 ranked 模式改变段位；casual/AI 兜底不影响排位分。
+    if (room.mode === 'ranked') {
+      try {
+        const oppTierA = isAiB ? 1 : (await this.userRepo.findOne({ where: { id: bId } }))?.rankTier ?? 1
+        const oppTierB = isAiA ? 1 : (await this.userRepo.findOne({ where: { id: aId } }))?.rankTier ?? 1
+        if (effectiveWinner === 0) {
+          await this.rankService.updateRankAfterMatch(aId, oppTierA, 'draw', statsA.score)
+          await this.rankService.updateRankAfterMatch(bId, oppTierB, 'draw', statsB.score)
+        } else if (effectiveWinner === 1) {
+          await this.rankService.updateRankAfterMatch(aId, oppTierA, 'win', statsA.score)
+          await this.rankService.updateRankAfterMatch(bId, oppTierB, 'lose', statsB.score)
+        } else {
+          await this.rankService.updateRankAfterMatch(aId, oppTierA, 'lose', statsA.score)
+          await this.rankService.updateRankAfterMatch(bId, oppTierB, 'win', statsB.score)
+        }
+        if (effectiveWinner === 0) {
+          if (aId > 0) await this.economyService.addCoins(aId, 10)
+          if (bId > 0) await this.economyService.addCoins(bId, 10)
+        } else {
+          const winnerId = effectiveWinner === 1 ? aId : bId
+          if (winnerId > 0) await this.economyService.addCoins(winnerId, 50)
+        }
+      } catch (error) {
+        this.logger.warn(`ranked settlement rewards failed for ${matchId}: ${(error as Error).message}`)
+      }
     }
     } catch (error) {
       await this.handleSettlementFailure(matchId, room, ids, error)
@@ -673,34 +829,71 @@ export class MatchService implements OnModuleDestroy {
     let winnerId: number
     try {
       sorted = [...ids].sort((a, b) => {
-      if (forfeitUserId !== undefined) {
-        if (a === forfeitUserId) return 1
-        if (b === forfeitUserId) return -1
-      }
-      const sa = statsMap.get(a)!, sb = statsMap.get(b)!
-      if (sa.score !== sb.score) return sb.score - sa.score
-      if (sa.rareCount !== sb.rareCount) return sb.rareCount - sa.rareCount
-      return sb.maxCombo - sa.maxCombo
-    })
-    ranks = new Map<number, number>()
-    sorted.forEach((uid, idx) => ranks.set(uid, idx + 1))
-    // winner is rank 1 (if forfeit, winner is first non-forfeit)
-    winnerId = sorted[0]
+        if (forfeitUserId !== undefined) {
+          if (a === forfeitUserId) return 1
+          if (b === forfeitUserId) return -1
+        }
+        const sa = statsMap.get(a)!, sb = statsMap.get(b)!
+        if (sa.score !== sb.score) return sb.score - sa.score
+        if (sa.rareCount !== sb.rareCount) return sb.rareCount - sa.rareCount
+        return sb.maxCombo - sa.maxCombo
+      })
+      ranks = new Map<number, number>()
+      let previousKey: string | null = null
+      let previousRank = 0
+      sorted.forEach((uid, index) => {
+        const stats = statsMap.get(uid)!
+        const key = `${stats.score}:${stats.rareCount}:${stats.maxCombo}`
+        const rank = key === previousKey ? previousRank : index + 1
+        ranks.set(uid, rank)
+        previousKey = key
+        previousRank = rank
+      })
+      winnerId = sorted[0]
     const winnerForDb = winnerId < 0 ? null : winnerId
-    await this.matchRepo.update({ id: matchId }, { status: 'finished', winnerId: winnerForDb as unknown as number | null, endedAt: new Date() })
+    const statusUpdate = await this.matchRepo.update(
+      { id: matchId, status: 'ongoing' },
+      { status: 'finished', winnerId: winnerForDb as unknown as number | null, endedAt: new Date() },
+    )
+    if (statusUpdate.affected !== 1) {
+      this.logger.warn(`Match4p ${matchId} already finalized by another worker`)
+      return
+    }
     const rows: MatchPlayerEntity[] = []
     for (const uid of ids) {
       const rp = room.players.get(uid)!
       const st = statsMap.get(uid)!
       rows.push(this.matchPlayerRepo.create({ matchId, userId: uid, score: st.score, rareCount: st.rareCount, maxCombo: st.maxCombo, rank: ranks.get(uid)!, sid: rp.sid, isAi: uid < 0, aiLevel: rp.aiLevel ?? null } as Partial<MatchPlayerEntity> as MatchPlayerEntity))
     }
-    await this.matchPlayerRepo.save(rows)
-    // rank updates for humans (simplified: rank 1 = win, else lose)
-    for (const uid of ids) if (uid > 0) {
+    await this.matchPlayerRepo.upsert(rows, ['matchId', 'sid'])
+    // 只有 ranked 模式改变段位；4p 以其余真人平均段位作为对手基准。
+    if (room.mode === 'ranked') {
+      for (const uid of ids) {
+        if (uid <= 0) continue
+        const opponentIds = ids.filter((other) => other > 0 && other !== uid)
+        let tierSum = 0
+        for (const opponentId of opponentIds) {
+          tierSum += (await this.userRepo.findOne({ where: { id: opponentId } }))?.rankTier ?? 1
+        }
+        const oppAvg = opponentIds.length > 0 ? Math.round(tierSum / opponentIds.length) : 1
+        const r = ranks.get(uid)!
+        try {
+          if (r === 1) await this.rankService.updateRankAfterMatch(uid, oppAvg, 'win', statsMap.get(uid)?.score ?? 0)
+          else await this.rankService.updateRankAfterMatch(uid, oppAvg, 'lose', statsMap.get(uid)?.score ?? 0)
+        } catch (error) {
+          this.logger.warn(`4p rank update failed for ${uid}: ${(error as Error).message}`)
+        }
+      }
+    }
+    for (const uid of ids) {
+      if (uid <= 0) continue
       const r = ranks.get(uid)!
-      const oppAvg = 1 // simplified
-      if (r === 1) await this.rankService.updateRankAfterMatch(uid, oppAvg, 'win')
-      else await this.rankService.updateRankAfterMatch(uid, oppAvg, 'lose')
+      try {
+        await this.achievementService.check(uid, 'match_4p', { rank: r })
+        await this.economyService.addCoins(uid, r === 1 ? 100 : 20)
+      } catch (error) {
+        this.logger.warn(`4p reward failed for ${uid}: ${(error as Error).message}`)
+      }
     }
     } catch (error) {
       await this.handleSettlementFailure(matchId, room, ids, error)
@@ -780,7 +973,16 @@ export class MatchService implements OnModuleDestroy {
       const sess = await this.redis.hgetall(`match_session:${sid}`)
       const score = parseInt(sess.score || '0', 10)
       const maxCombo = parseInt(sess.maxCombo || '0', 10)
-      return { score, rareCount: 0, maxCombo, foundWords: [] }
+      const foundWords = await this.redis.smembers(`match_session:${sid}:found`)
+      const rarityEntries = sess.potentialWordsWithRarity
+        ? (JSON.parse(sess.potentialWordsWithRarity) as Array<{ word: string; rarity: string }>)
+        : []
+      const rarityMap = new Map(rarityEntries.map((entry) => [entry.word, entry.rarity]))
+      const rareCount = foundWords.filter((word) => {
+        const rarity = rarityMap.get(word)
+        return rarity === 'idiom' || rarity === 'rare'
+      }).length
+      return { score, rareCount, maxCombo, foundWords: [] }
     }
     const res = await this.gameService.endGame(userId, sid)
     const rareCount = res.foundWords.filter(
@@ -866,8 +1068,9 @@ export class MatchService implements OnModuleDestroy {
     const pool = room.aiPools.get(aiId)
     if (!pool || pool.length === 0) return
     const aiLevel = room.players.get(aiId)?.aiLevel ?? 'L3'
-    // 随机有放回抽样，池常驻不剔除
-    const entry = pool[Math.floor(Math.random() * pool.length)]
+    const nextIndex = room.aiIndices.get(aiId) ?? 0
+    const entry = pool[nextIndex % pool.length]
+    room.aiIndices.set(aiId, (nextIndex + 1) % pool.length)
     const elapsedSec = 180 - room.remainingSec
     if (this.aiService.shouldMiss(aiLevel, entry.rarity, elapsedSec)) {
       const t = setTimeout(() => this.startAiDriving(room, aiId), this.aiService.randomInterval(aiLevel))
@@ -880,6 +1083,10 @@ export class MatchService implements OnModuleDestroy {
       const sid = room.players.get(aiId)!.sid
       const sessionKey = `match_session:${sid}`
       const foundKey = `${sessionKey}:found`
+      if (await this.redis.sismember(foundKey, entry.word)) {
+        this.startAiDriving(room, aiId)
+        return
+      }
       let raw: unknown
       try {
         raw = await this.redis.eval(

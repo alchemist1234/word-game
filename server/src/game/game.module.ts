@@ -10,6 +10,7 @@ import { UserFoundWordEntity } from '../user/user-found-word.entity'
 import { MatchModule } from '../match/match.module'
 import { AchievementModule } from '../achievement/achievement.module'
 import { GameSettlementEntity } from './game-settlement.entity'
+import { OutboxModule } from '../outbox/outbox.module'
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { GameSettlementEntity } from './game-settlement.entity'
     AuthModule,
     forwardRef(() => MatchModule),
     forwardRef(() => AchievementModule),
+    OutboxModule,
     TypeOrmModule.forFeature([UserFoundWordEntity, GameSettlementEntity]),
   ],
   controllers: [GameController],

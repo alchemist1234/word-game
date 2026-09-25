@@ -12,6 +12,9 @@ export class MatchEntity {
   @Column({ type: 'varchar', length: 16, default: 'pvp_1v1' })
   type!: string
 
+  @Column({ type: 'varchar', length: 16, default: 'casual' })
+  mode!: string
+
   /** grid_pool.id（同一网格种子，双方共用） */
   @Column({ type: 'varchar', length: 64 })
   gridSeed!: string

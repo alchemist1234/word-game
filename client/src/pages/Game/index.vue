@@ -43,7 +43,7 @@ async function onApplyWord() {
   const confirmed = await new Promise<boolean>((resolve) => {
     uni.showModal({
       title: `申请收录“${word}”？`,
-      content: '多人申请后将加入词库，本局不加分',
+      content: '达到申请阈值后进入待审核队列，审核通过后新对局可用；本局不加分',
       confirmText: '提交申请',
       cancelText: '取消',
       success: (r) => resolve(!!r.confirm),
@@ -56,7 +56,7 @@ async function onApplyWord() {
     store.markWordApplied(word)
     if (res.inDict) applyHint.value = '已收录，新开对局可用'
     else if (res.autoMerged) applyHint.value = '已加入词库，新开对局可用'
-    else applyHint.value = `已申请 ${res.supporters}/${res.threshold}`
+    else applyHint.value = `已申请 ${res.supporters}/${res.threshold}，待审核`
   } catch (e) {
     uni.showToast({ title: (e as Error).message || '提交失败', icon: 'none' })
   } finally {
@@ -148,6 +148,15 @@ async function onUseItem(itemId: string) {
     }
     if (itemId === 'double') {
       uni.showToast({ title: '下一词双倍', icon: 'none' })
+    }
+    if (itemId === 'peek' && Array.isArray(result.targets) && result.targets.length > 0) {
+      const first = result.targets[0] as { word: string; cells: Array<{ row: number; col: number }> }
+      const firstCell = first.cells[0]
+      if (firstCell) {
+        hintCell.value = firstCell
+        hintChar.value = first.word[0]
+      }
+      uni.showToast({ title: `透视显示 ${result.targets.length} 个目标词`, icon: 'none' })
     }
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : '使用失败'

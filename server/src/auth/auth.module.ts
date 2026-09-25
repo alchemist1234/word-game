@@ -3,11 +3,12 @@ import { TypeOrmModule } from '@nestjs/typeorm'
 import { JwtModule } from '@nestjs/jwt'
 import { UserEntity } from '../user/user.entity'
 import { UserAuthEntity } from '../user/user-auth.entity'
+import { config } from '../common/config'
 import { AuthService } from './auth.service'
 import { AuthController } from './auth.controller'
 import { JwtAuthGuard } from './jwt.guard'
 
-const JWT_SECRET = 'wordgame-dev-secret-iterate4'
+const JWT_SECRET = config.jwtSecret
 
 @Module({
   imports: [

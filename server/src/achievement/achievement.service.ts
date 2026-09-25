@@ -39,12 +39,21 @@ export class AchievementService {
     trigger: string
     unlocked: boolean
     claimed: boolean
+    progress: number
     unlockedAt?: Date
   }>> {
     const rows = await this.repo.find({ where: { userId } })
     const map = new Map(rows.map((r) => [r.achievementId, r]))
+    const user = await this.userRepo.findOne({ where: { id: userId } })
+    const collected = await this.foundRepo.count({ where: { userId } })
     return ACHIEVEMENTS.map((a) => {
       const r = map.get(a.id)
+      let progress = r ? 1 : 0
+      if (!r && a.trigger === 'pokedex') {
+        progress = Math.min(1, collected / Math.max(1, Number(a.condition.collected ?? 1)))
+      } else if (!r && a.trigger === 'rank' && user) {
+        progress = Math.min(1, user.rankTier / Math.max(1, Number(a.condition.tier ?? 1)))
+      }
       return {
         id: a.id,
         name: a.name,
@@ -52,6 +61,7 @@ export class AchievementService {
         trigger: a.trigger,
         unlocked: !!r,
         claimed: r?.claimed ?? false,
+        progress: Math.round(progress * 100) / 100,
         unlockedAt: r?.unlockedAt,
       }
     })

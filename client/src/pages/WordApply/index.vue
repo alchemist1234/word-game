@@ -4,12 +4,14 @@ import { onShow } from '@dcloudio/uni-app'
 import { fetchMyWordApplies, type MyWordApply } from '../../api'
 
 const list = ref<MyWordApply[]>([])
+const threshold = ref(10)
 const loading = ref(true)
 
 function statusText(item: MyWordApply): string {
   if (item.status === 'auto_merged' || item.status === 'approved') return '已加入词库'
   if (item.status === 'rejected') return '未通过'
-  return '审核中'
+  if (item.status === 'pending') return `审核中·${item.supporters}/${threshold.value}`
+  return item.status
 }
 
 function formatTime(iso: string): string {
@@ -25,6 +27,7 @@ async function load() {
   loading.value = true
   try {
     const res = await fetchMyWordApplies()
+    threshold.value = res.threshold
     list.value = res.list
   } catch (e) {
     console.error('fetchMyWordApplies', e)

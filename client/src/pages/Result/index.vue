@@ -20,7 +20,7 @@ async function loadApplyStatus() {
       const res = await fetchWordSupporters(a.word)
       if (res.inDict) applyStatus.value.set(a.word, '已收录，新开对局可用')
       else if (res.appliedByMe || store.hasWordApplied(a.word)) {
-        applyStatus.value.set(a.word, `已申请 ${res.supporters}/${res.threshold}`)
+        applyStatus.value.set(a.word, `已申请 ${res.supporters}/${res.threshold}，待审核`)
       }
     } catch {
       // 查询失败不阻塞展示，保留申请按钮
@@ -41,15 +41,22 @@ async function onApplyInvalid(word: string) {
     store.markWordApplied(word)
     if (res.inDict) applyStatus.value.set(word, '已收录，新开对局可用')
     else if (res.autoMerged) applyStatus.value.set(word, '已加入词库，新开对局可用')
-    else applyStatus.value.set(word, `已申请 ${res.supporters}/${res.threshold}`)
+    else applyStatus.value.set(word, `已申请 ${res.supporters}/${res.threshold}，待审核`)
   } catch (e) {
-    uni.showToast({ title: (e as Error).message || '提交失败', icon: 'none' })
+    const status = (e as Error & { status?: number }).status
+    if (status === 404) {
+      manualWord.value = word
+      uni.showToast({ title: '会话已过期，请用下方文字申请', icon: 'none' })
+    } else {
+      uni.showToast({ title: (e as Error).message || '提交失败', icon: 'none' })
+    }
   } finally {
     applyingWord.value = null
   }
 }
 
 async function onApplyManual() {
+  if (applyingWord.value) return
   const word = manualWord.value.trim()
   if (!word) return
   if (!/^[\u4e00-\u9fff]{2,6}$/.test(word)) {
@@ -65,7 +72,7 @@ async function onApplyManual() {
     }
     if (res.inDict) applyStatus.value.set(word, '已收录，新开对局可用')
     else if (res.autoMerged) applyStatus.value.set(word, '已加入词库，新开对局可用')
-    else applyStatus.value.set(word, `已申请 ${res.supporters}/${res.threshold}`)
+    else applyStatus.value.set(word, `已申请 ${res.supporters}/${res.threshold}，待审核`)
     manualWord.value = ''
   } catch (e) {
     uni.showToast({ title: (e as Error).message || '提交失败', icon: 'none' })
@@ -276,11 +283,11 @@ function goDaily() {
           placeholder="手动输入要补充的词"
           :maxlength="6"
         />
-        <view class="apply-btn" @tap="onApplyManual">
-          <text class="apply-btn-text">提交</text>
+        <view class="apply-btn" :class="{ disabled: applyingWord !== null }" @tap="onApplyManual">
+          <text class="apply-btn-text">{{ applyingWord ? '提交中...' : '提交' }}</text>
         </view>
       </view>
-      <text class="apply-hint">多人申请后将加入词库，本局不加分</text>
+      <text class="apply-hint">达到阈值后进入待审核队列，审核通过后新对局可用；本局不加分</text>
     </view>
 
     <view v-if="canShareChallenge" class="share-section">

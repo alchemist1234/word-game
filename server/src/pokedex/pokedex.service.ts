@@ -98,13 +98,13 @@ export class PokedexService {
     if (query?.groupBy) {
       const map = new Map<string, EnrichedWord[]>()
       for (const w of enriched) {
-        let key = ''
-        if (query.groupBy === 'rarity') key = w.rarity
-        else if (query.groupBy === 'length') key = String(w.length ?? w.word.length)
-        else if (query.groupBy === 'tag') key = (w.tags && w.tags[0]) || '其他'
-        else key = w.rarity
-        if (!map.has(key)) map.set(key, [])
-        map.get(key)!.push(w)
+        const keys = query.groupBy === 'tag'
+          ? (w.tags && w.tags.length > 0 ? w.tags : ['其他'])
+          : [query.groupBy === 'length' ? String(w.length ?? w.word.length) : w.rarity]
+        for (const key of keys) {
+          if (!map.has(key)) map.set(key, [])
+          map.get(key)!.push(w)
+        }
       }
       groups = [...map.entries()].map(([key, ws]) => ({ key, count: ws.length, words: ws }))
     }

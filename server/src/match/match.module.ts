@@ -10,6 +10,8 @@ import { AuthModule } from '../auth/auth.module'
 import { GameModule } from '../game/game.module'
 import { AiModule } from '../ai/ai.module'
 import { RankModule } from '../rank/rank.module'
+import { AchievementModule } from '../achievement/achievement.module'
+import { EconomyModule } from '../economy/economy.module'
 
 /**
  * 实时 1v1 对战模块（迭代6详细设计 §2.2）
@@ -24,6 +26,8 @@ import { RankModule } from '../rank/rank.module'
     AuthModule,
     AiModule,
     RankModule,
+    AchievementModule,
+    EconomyModule,
     TypeOrmModule.forFeature([UserEntity, MatchEntity, MatchPlayerEntity]),
   ],
   controllers: [MatchController],

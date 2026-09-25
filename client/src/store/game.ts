@@ -19,6 +19,14 @@ import { connectSocket, sendWs, isWsConnected, type WsMessage } from '../api/soc
 const GAME_DURATION = 90
 
 let timerId: ReturnType<typeof setInterval> | null = null
+let requestSequence = 0
+
+interface PendingWord {
+  requestId: string
+  word: string
+  cells: CellPos[]
+  sid: string
+}
 
 export const useGameStore = defineStore('game', () => {
   const phase = ref<GamePhase>('idle')
@@ -149,8 +157,8 @@ export const useGameStore = defineStore('game', () => {
     phase.value = 'playing'
     opponent.value = { ...d.opponent, score: 0, combo: 0 }
   }
-  // WebSocket 提词待匹配队列（消息有序，FIFO 匹配结果到提交的词）
-  const pendingWords = ref<Array<{ word: string; cells: CellPos[] }>>([])
+  // WebSocket 提词待匹配队列（按 requestId 关联，避免乱序响应错配）
+  const pendingWords = ref<PendingWord[]>([])
 
   const currentWord = computed(() => {
     if (grid.value.length === 0) return ''
@@ -342,74 +350,42 @@ export const useGameStore = defineStore('game', () => {
     // 新一轮提交：清掉上一轮失败入口
     lastFailWord.value = null
     lastFailReason.value = null
-    // 记录待匹配的词（WebSocket 消息有序，FIFO 匹配结果）
-    pendingWords.value.push({ word, cells })
+    // 记录待匹配的词（requestId 让乱序响应仍能准确归属）
+    const requestId = `${Date.now()}-${++requestSequence}`
+    const sid = matchSessionId.value
+    pendingWords.value.push({ requestId, word, cells, sid })
     if (isWsConnected()) {
       // cells 压缩为 [[r,c],...] 省字节
       sendWs('submit_word', {
         sid: matchSessionId.value,
         word,
         cells: cells.map((c) => [c.row, c.col]),
+        requestId,
       })
       // 超时兜底：1.5s 内未收到 word_result 则回退 HTTP，保证有反馈
-      const fallbackWord = word
-      const fallbackCells = cells
-      const fallbackSid = matchSessionId.value
       setTimeout(async () => {
-        const idx = pendingWords.value.findIndex((p) => p.word === fallbackWord)
-        if (idx === -1) return
-        pendingWords.value.splice(idx, 1)
+        const pending = pendingWords.value.find((item) => item.requestId === requestId)
+        if (!pending) return
         try {
-          const res = await submitWordHttp(fallbackSid, fallbackWord, fallbackCells)
-          if (res.valid && res.score !== undefined) {
-            foundWords.value.push({
-              word: fallbackWord,
-              cells: fallbackCells,
-              score: res.score,
-              rarity: (res.rarity ?? 'common') as Rarity,
-            })
-            score.value = res.totalScore ?? score.value + res.score
-            combo.value = res.combo ?? 0
-            comboBonus.value = res.comboBonus ?? 0
-            maxCombo.value = Math.max(maxCombo.value, combo.value)
-            lastFeedback.value = 'success'
-            lastFloatScore.value = res.score
-            lastFoundRarity.value = res.rarity ?? null
-            if (res.perfect) {
-              perfect.value = true
-              perfectBonus.value = res.perfectBonus ?? 0
-              void endGame()
-            }
-          } else if (res.reason === 'duplicate') {
-            lastFeedback.value = 'duplicate'
-          } else {
-            lastFeedback.value = 'fail'
-            lastFailWord.value = fallbackWord
-            lastFailReason.value = res.reason ?? 'fail'
-            if (res.reason === 'not_in_dict') {
-              trackInvalidAttempt(fallbackWord, fallbackCells)
-            }
-          }
+          const res = await submitWordHttp(pending.sid, pending.word, pending.cells)
+          handleWordResult({ ...res, requestId })
         } catch {
+          pendingWords.value = pendingWords.value.filter((item) => item.requestId !== requestId)
           lastFeedback.value = 'fail'
         }
       }, 1500)
     } else {
       try {
-        const res = await submitWordHttp(matchSessionId.value, word, cells)
-        handleWordResult(res)
+        const res = await submitWordHttp(sid, word, cells)
+        handleWordResult({ ...res, requestId })
       } catch {
-        pendingWords.value.shift()
+        pendingWords.value = pendingWords.value.filter((item) => item.requestId !== requestId)
         lastFeedback.value = 'fail'
       }
     }
   }
 
-  /** 处理 WebSocket 返回的提词结果 */
-  function handleWordResult(res: SubmitWordResponse) {
-    const pending = pendingWords.value.shift()
-    if (!pending) return
-
+  function processWordResponse(res: SubmitWordResponse, pending: PendingWord) {
     if (res.valid && res.score !== undefined) {
       foundWords.value.push({
         word: pending.word,
@@ -424,7 +400,6 @@ export const useGameStore = defineStore('game', () => {
       lastFeedback.value = 'success'
       lastFloatScore.value = res.score
       lastFoundRarity.value = res.rarity ?? null
-      // 完美通关：提前结束并结算（剩余时间加成）
       if (res.perfect) {
         perfect.value = true
         perfectBonus.value = res.perfectBonus ?? 0
@@ -440,6 +415,16 @@ export const useGameStore = defineStore('game', () => {
         trackInvalidAttempt(pending.word, pending.cells)
       }
     }
+  }
+
+  /** 处理 WebSocket 返回的提词结果 */
+  function handleWordResult(res: SubmitWordResponse) {
+    const index = res.requestId
+      ? pendingWords.value.findIndex((item) => item.requestId === res.requestId)
+      : 0
+    if (index < 0 || index >= pendingWords.value.length) return
+    const [pending] = pendingWords.value.splice(index, 1)
+    if (pending) processWordResponse(res, pending)
   }
 
   function applyMatchStart4pData(d: { matchId: string; grid: string[][]; size: number; duration: number; mySid: string; players: Array<{ userId: number; nickname: string; rankTier: number; isAi: boolean }> }) {
@@ -462,6 +447,15 @@ export const useGameStore = defineStore('game', () => {
 
   /** WebSocket 消息分发 */
   function handleWsMessage(msg: WsMessage) {
+    if (msg.event === 'error') {
+      const d = msg.data as { requestId?: string; message?: string }
+      if (d.requestId) {
+        pendingWords.value = pendingWords.value.filter((item) => item.requestId !== d.requestId)
+      }
+      lastFeedback.value = 'fail'
+      errorMsg.value = d.message ?? '提词失败，请重试'
+      return
+    }
     if (msg.event === 'match_error') {
       const d = msg.data as { matchId?: string; message?: string }
       errorMsg.value = d.message ?? '对局结算失败，请返回大厅重试'

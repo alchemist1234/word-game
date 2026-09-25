@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common'
+import { join } from 'path'
 import { TypeOrmModule } from '@nestjs/typeorm'
 import { ScheduleModule } from '@nestjs/schedule'
 import { config } from './common/config'
@@ -14,6 +15,7 @@ import { MatchPlayerEntity } from './match/match-player.entity'
 import { ChallengeEntity } from './challenge/challenge.entity'
 import { ChallengeAttemptEntity } from './challenge/challenge-attempt.entity'
 import { DailyChallengeEntity } from './daily/daily-challenge.entity'
+import { DailyRewardClaimEntity } from './daily/daily-reward-claim.entity'
 import { DailyAttemptEntity } from './daily/daily-attempt.entity'
 import { LeaderboardSnapshotEntity } from './leaderboard/leaderboard-snapshot.entity'
 import { DictionaryModule } from './dictionary/dictionary.module'
@@ -36,6 +38,10 @@ import { UserItemEntity } from './item/user-item.entity'
 import { UserAchievementEntity } from './achievement/user-achievement.entity'
 import { WordApplyEntity } from './word-apply/word-apply.entity'
 import { GameSettlementEntity } from './game/game-settlement.entity'
+import { OutboxEventEntity } from './outbox/outbox-event.entity'
+import { SeasonSettlementEntity } from './rank/season-settlement.entity'
+import { OutboxModule } from './outbox/outbox.module'
+import { HealthModule } from './health/health.module'
 
 @Module({
   imports: [
@@ -59,13 +65,18 @@ import { GameSettlementEntity } from './game/game-settlement.entity'
         ChallengeAttemptEntity,
         DailyChallengeEntity,
         DailyAttemptEntity,
+        DailyRewardClaimEntity,
         LeaderboardSnapshotEntity,
         UserItemEntity,
         UserAchievementEntity,
         WordApplyEntity,
         GameSettlementEntity,
+        OutboxEventEntity,
+        SeasonSettlementEntity,
       ],
-      synchronize: true,
+      synchronize: config.db.synchronize,
+      migrations: [join(__dirname, 'migrations', '*.{ts,js}')],
+      migrationsRun: config.db.migrationsRun,
     }),
     ScheduleModule.forRoot(),
     RedisModule,
@@ -85,6 +96,8 @@ import { GameSettlementEntity } from './game/game-settlement.entity'
     ItemModule,
     AchievementModule,
     WordApplyModule,
+    OutboxModule,
+    HealthModule,
   ],
 })
 export class AppModule {}

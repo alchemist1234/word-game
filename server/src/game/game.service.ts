@@ -6,6 +6,7 @@ import {
   Logger,
   Inject,
   forwardRef,
+  Optional,
 } from '@nestjs/common'
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm'
 import { DataSource, EntityManager, Repository } from 'typeorm'
@@ -19,6 +20,7 @@ import { REDIS_TOKEN } from '../common/redis.module'
 import { GridPoolEntity } from '../grid-pool/grid-pool.entity'
 import { AchievementService } from '../achievement/achievement.service'
 import { GameSettlementEntity } from './game-settlement.entity'
+import { OutboxService } from '../outbox/outbox.service'
 import {
   SUBMIT_WORD_SCRIPT,
   ASSERT_END_LOCK_SCRIPT,
@@ -85,6 +87,7 @@ export class GameService {
     private readonly dataSource: DataSource,
     @Inject(forwardRef(() => AchievementService))
     private readonly achievementService?: AchievementService,
+    @Optional() private readonly outboxService?: OutboxService,
   ) {}
 
   /** 取一张网格并创建对局会话（单人/自由模式） */
@@ -461,8 +464,9 @@ export class GameService {
     if (finalStatus !== 'ok') {
       throw new ConflictException('结算状态补写失败，请重试')
     }
-    // 缓存命中也补偿排行榜/成就等非事务副作用，支持失败后重试。
-    await this.runPostSettlementEffects(userId, result)
+    // 缓存命中只补写同一 dedupe 事件；真正副作用由 outbox worker 异步重试。
+    const matchSessionId = sessionKey.slice('match_session:'.length)
+    await this.runPostSettlementEffects(userId, result, matchSessionId)
     return result
   }
 
@@ -544,6 +548,7 @@ export class GameService {
       await this.runPostSettlementEffects(
         Number(existing.userId),
         existing.result,
+        matchSessionId,
       )
       return existing.result
     }
@@ -555,7 +560,15 @@ export class GameService {
         const raced = await manager.findOne(GameSettlementEntity, {
           where: { matchSessionId },
         })
-        if (raced) return raced.result
+        if (raced) {
+          await this.outboxService?.enqueueSettlementEffects(
+            manager,
+            matchSessionId,
+            Number(raced.userId),
+            raced.result,
+          )
+          return raced.result
+        }
         await this.upsertFoundWordsWithManager(
           manager,
           userId,
@@ -568,6 +581,12 @@ export class GameService {
             result: calculated,
           }),
         )
+        await this.outboxService?.enqueueSettlementEffects(
+          manager,
+          matchSessionId,
+          userId,
+          calculated,
+        )
         return calculated
       })
     } catch (error) {
@@ -578,15 +597,35 @@ export class GameService {
       result = raced.result
     }
 
-    await this.runPostSettlementEffects(userId, result)
+    await this.runPostSettlementEffects(userId, result, matchSessionId)
     return result
   }
 
   private async runPostSettlementEffects(
     userId: number,
     result: GameEndResult,
+    matchSessionId: string,
   ): Promise<void> {
     if (userId <= 0) return
+    if (this.outboxService) {
+      try {
+        await this.outboxService.ensureSettlementEffects(
+          matchSessionId,
+          userId,
+          result,
+        )
+        await this.outboxService.dispatchNow()
+      } catch (error) {
+        this.logger.warn(
+          `settlement outbox enqueue/dispatch failed: ${(error as Error).message}`,
+        )
+        // outbox 不可用时保留 best-effort 兼容路径；两者均有幂等保护。
+        await this.updateLeaderboard(userId, result.score)
+        await this.checkAchievements(userId, result)
+      }
+      return
+    }
+    // 单元测试/尚未接入 outbox 的旧调用方保留兼容路径。
     await this.updateLeaderboard(userId, result.score)
     await this.checkAchievements(userId, result)
   }

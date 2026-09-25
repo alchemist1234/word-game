@@ -50,6 +50,7 @@ export class DictionaryService implements OnModuleInit {
       rarity: e.rarity as Rarity,
       chars: e.chars,
       meaning: e.meaning ?? undefined,
+      tags: e.tags ?? [],
     }))
     for (const w of words) {
       trie.insert(w.word)

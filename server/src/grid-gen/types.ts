@@ -9,6 +9,7 @@ export interface DictWord {
   rarity: Rarity
   chars: string[]
   meaning?: string
+  tags?: string[]
 }
 
 /** 格子坐标 */

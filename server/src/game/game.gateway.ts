@@ -89,17 +89,21 @@ export class GameGateway
     if (!data) {
       return { event: 'error', data: { message: 'unauthorized' } }
     }
+    let requestId: string | undefined
     try {
       const message = this.unwrapMessage<{
         sid: string
         word: string
         cells: number[][]
+        requestId?: string
       }>(payload)
+      requestId = message?.requestId
       if (
         !message ||
         typeof message.sid !== 'string' ||
         typeof message.word !== 'string' ||
-        !Array.isArray(message.cells)
+        !Array.isArray(message.cells) ||
+        (message.requestId !== undefined && typeof message.requestId !== 'string')
       ) {
         return { event: 'error', data: { message: 'invalid submit_word payload' } }
       }
@@ -117,9 +121,15 @@ export class GameGateway
       if (result.valid && result.matchId) {
         void this.matchService.broadcastScore(result.matchId)
       }
-      return { event: 'word_result', data: result }
+      return {
+        event: 'word_result',
+        data: message.requestId ? { ...result, requestId: message.requestId } : result,
+      }
     } catch (e) {
-      return { event: 'error', data: { message: (e as Error).message } }
+      return {
+        event: 'error',
+        data: { message: (e as Error).message, requestId },
+      }
     }
   }
 

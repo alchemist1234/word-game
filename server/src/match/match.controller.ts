@@ -15,9 +15,13 @@ export class MatchController {
   }
 
   @Get('queue')
-  queueStatus(@Req() req: { user: { userId: number } }, @Query('size') sizeQuery?: string) {
+  queueStatus(
+    @Req() req: { user: { userId: number } },
+    @Query('size') sizeQuery?: string,
+    @Query('mode') mode?: string,
+  ) {
     const size = sizeQuery === '4' ? 4 : 2
-    return this.matchService.queueStatus(req.user.userId, { size })
+    return this.matchService.queueStatus(req.user.userId, { size, mode })
   }
 
   @Delete('queue')

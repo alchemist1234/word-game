@@ -14,13 +14,15 @@ const store = useGameStore()
 const queuing = ref(false)
 const queueError = ref('')
 let queueTimer: ReturnType<typeof setInterval> | null = null
+const matchMode = String(uni.getStorageSync('matchMode') || 'casual')
+uni.removeStorageSync('matchMode')
 
 onLoad(async () => {
   store.resetMatch()
   queuing.value = true
   queueError.value = ''
   try {
-    await queueMatch()
+    await queueMatch({ mode: matchMode })
   } catch (e) {
     queueError.value = '匹配入队失败，请稍后重试'
     queuing.value = false
@@ -29,7 +31,7 @@ onLoad(async () => {
   // 轮询状态：matched 后网格/对局数据由 WS match_start 推送
   queueTimer = setInterval(async () => {
     try {
-      const res = await matchQueueStatus()
+      const res = await matchQueueStatus(undefined, matchMode)
       if (res.status === 'timeout') {
         stopQueue()
         queueError.value = '未匹配到对手（30 秒超时），请重试'
@@ -67,7 +69,7 @@ function stopQueue() {
 async function onCancel() {
   stopQueue()
   try {
-    await cancelMatchQueue()
+    await cancelMatchQueue(undefined, matchMode)
   } catch {
     // 忽略
   }
@@ -246,7 +248,7 @@ function onBackHome() {
 
 onUnload(() => {
   if (queuing.value) {
-    void cancelMatchQueue()
+    void cancelMatchQueue(undefined, matchMode)
   }
   stopQueue()
   if (countdownTimer) clearInterval(countdownTimer)
@@ -267,7 +269,7 @@ onBackPress(() => {
       success: (res) => {
         if (res.confirm) {
           if (queuing.value) {
-            void cancelMatchQueue()
+            void cancelMatchQueue(undefined, matchMode)
           } else {
             // 主动离开：服务端立即结束对局并判对方胜利（不管当前得分）
             void abandonMatch().catch((error: unknown) => {

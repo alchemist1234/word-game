@@ -6,6 +6,7 @@ import { fetchRankMe, fetchEconomy } from '../../api'
 const rank = ref<{ rankTier: number; rankScore: number; wins: number; losses: number; winRate: number; season: string } | null>(null)
 const economy = ref<{ coins: number; diamonds: number; stamina: number; maxStamina: number } | null>(null)
 const loading = ref(true)
+const starting = ref(false)
 
 const tierNames: Record<number, string> = { 1: '字童', 2: '字生', 3: '字秀', 4: '字举', 5: '字士', 6: '字翰', 7: '字圣' }
 
@@ -21,6 +22,13 @@ async function load() {
   loading.value = false
 }
 onShow(load)
+
+function startRanked() {
+  if (starting.value) return
+  starting.value = true
+  uni.setStorageSync('matchMode', 'ranked')
+  uni.navigateTo({ url: '/pages/Battle/index' })
+}
 </script>
 
 <template>
@@ -39,6 +47,7 @@ onShow(load)
         <text>🪙 {{ economy.coins }}  💎 {{ economy.diamonds }}  ⚡ {{ economy.stamina }}/{{ economy.maxStamina }}</text>
       </view>
       <text class="desc">自然月赛季重置保留60%积分，胜+20±段位差，负-10±段位差</text>
+      <button class="rank-start" :disabled="starting" @tap="startRanked">{{ starting ? '进入中...' : '开始段位赛' }}</button>
     </view>
   </view>
 </template>
@@ -54,4 +63,5 @@ onShow(load)
 .stat { font-size: 26rpx; color: #3a2e2e; }
 .eco { font-size: 24rpx; color: #8a7a6a; margin-top: 12rpx; }
 .desc { font-size: 22rpx; color: #b0a090; margin-top: 20rpx; text-align: center; }
+.rank-start { margin-top: 20rpx; background: #2980b9; color: #fff; border-radius: 12rpx; font-size: 28rpx; }
 </style>

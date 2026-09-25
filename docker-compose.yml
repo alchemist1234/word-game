@@ -16,8 +16,11 @@ services:
       retries: 10
   redis:
     image: docker.m.daocloud.io/library/redis:7
+    command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "6379:6379"
+    volumes:
+      - redisdata:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -25,3 +28,4 @@ services:
       retries: 10
 volumes:
   pgdata:
+  redisdata:

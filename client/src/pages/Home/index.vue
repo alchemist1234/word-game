@@ -48,6 +48,9 @@ function onInventory() {
 function onAchievement() {
   uni.navigateTo({ url: '/pages/Achievement/index' })
 }
+function onWordApplies() {
+  uni.navigateTo({ url: '/pages/WordApply/index' })
+}
 function onLogout() {
   disconnectSocket()
   clearToken()
@@ -116,6 +119,11 @@ function onLogout() {
         <text class="menu-icon">成</text>
         <text class="menu-label">成就</text>
         <text class="menu-desc">解锁称号与奖励</text>
+      </view>
+      <view class="menu-item" @tap="onWordApplies">
+        <text class="menu-icon">申</text>
+        <text class="menu-label">我的词条申请</text>
+        <text class="menu-desc">查看待审核与已收录词</text>
       </view>
     </view>
 

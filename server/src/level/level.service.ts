@@ -155,7 +155,8 @@ export class LevelService {
       throw new ForbiddenException('关卡尚未解锁')
     }
     await this.economyService.consumeStamina(userId, 1)
-    // specificWord 关保底：内存生成多张取最优，不消耗网格池（全清可3星），最多8次
+    try {
+      // specificWord 关保底：内存生成多张取最优，不消耗网格池（全清可3星），最多8次
     if (cfg.objective.type === 'specificWord' && cfg.objective.char) {
       const goal = cfg.objective.target ?? 0
       const [, , s3] = this.calcThresholds(goal)
@@ -220,6 +221,13 @@ export class LevelService {
       title: cfg.title,
       boss: !!cfg.boss,
     }
+    } catch (error) {
+      // 建局失败不吞掉体力，避免用户为系统故障付费。
+      await this.economyService.addStamina(userId, 1).catch((refundError: unknown) => {
+        this.logger.warn(`stamina refund failed: ${String(refundError)}`)
+      })
+      throw error
+    }
   }
 
   /** 提交关卡：结算 + 星级 + 进度 */
@@ -258,7 +266,13 @@ export class LevelService {
     const stars = this.calcStars(actualValue, goal, maxAchievable)
 
     if (stars >= 1) {
+      const previous = await this.progressRepo.findOne({
+        where: { userId, levelId: cfg.id },
+      })
       await this.upsertProgress(userId, cfg.id, stars, result.score)
+      if (!previous?.completed) {
+        await this.economyService.addCoins(userId, stars * 20)
+      }
     }
     // 成就钩子（8b）
     try {
@@ -422,24 +436,15 @@ export class LevelService {
     stars: number,
     score: number,
   ): Promise<void> {
-    const existing = await this.progressRepo.findOne({
-      where: { userId, levelId },
-    })
-    if (existing) {
-      existing.stars = Math.max(existing.stars, stars)
-      existing.bestScore = Math.max(existing.bestScore, score)
-      existing.completed = true
-      await this.progressRepo.save(existing)
-    } else {
-      await this.progressRepo.save(
-        this.progressRepo.create({
-          userId,
-          levelId,
-          stars,
-          bestScore: score,
-          completed: true,
-        }),
-      )
-    }
+    await this.progressRepo.query(
+      `INSERT INTO user_progress (user_id, level_id, stars, "bestScore", completed, "updatedAt")
+       VALUES ($1, $2, $3, $4, true, NOW())
+       ON CONFLICT (user_id, level_id) DO UPDATE SET
+         stars = GREATEST(user_progress.stars, EXCLUDED.stars),
+         "bestScore" = GREATEST(user_progress."bestScore", EXCLUDED."bestScore"),
+         completed = true,
+         "updatedAt" = NOW()`,
+      [userId, levelId, stars, score],
+    )
   }
 }

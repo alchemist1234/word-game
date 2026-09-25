@@ -1,7 +1,7 @@
 import { Injectable, OnModuleInit, Logger, NotFoundException, BadRequestException, ForbiddenException, Inject } from '@nestjs/common'
 import { Interval } from '@nestjs/schedule'
-import { InjectRepository } from '@nestjs/typeorm'
-import { Repository, LessThan } from 'typeorm'
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm'
+import { DataSource, Repository } from 'typeorm'
 import Redis from 'ioredis'
 import { v4 as uuidv4 } from 'uuid'
 import { REDIS_TOKEN } from '../common/redis.module'
@@ -11,8 +11,11 @@ import { generateGrid } from '../grid-gen/grid-gen'
 import { cstDateStr, cstMonthStr, cstDateToDayKey } from '../common/time'
 import { DailyChallengeEntity } from './daily-challenge.entity'
 import { DailyAttemptEntity } from './daily-attempt.entity'
+import { DailyRewardClaimEntity } from './daily-reward-claim.entity'
 import { LeaderboardSnapshotEntity } from '../leaderboard/leaderboard-snapshot.entity'
 import { UserEntity } from '../user/user.entity'
+import { RankService } from '../rank/rank.service'
+import { AchievementService } from '../achievement/achievement.service'
 
 @Injectable()
 export class DailyService implements OnModuleInit {
@@ -30,6 +33,12 @@ export class DailyService implements OnModuleInit {
     private readonly snapshotRepo: Repository<LeaderboardSnapshotEntity>,
     @InjectRepository(UserEntity)
     private readonly userRepo: Repository<UserEntity>,
+    @InjectRepository(DailyRewardClaimEntity)
+    private readonly rewardClaimRepo: Repository<DailyRewardClaimEntity>,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
+    private readonly rankService: RankService,
+    private readonly achievementService: AchievementService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -68,6 +77,7 @@ export class DailyService implements OnModuleInit {
       const prevMonth = cstMonthStr(prev)
       if (prevMonth !== month) {
         await this.settleSeason(prevMonth).catch((e) => this.logger.warn(`settleSeason ${prevMonth} failed: ${(e as Error).message}`))
+        await this.rankService.settleRankSeason(prevMonth).catch((e) => this.logger.warn(`settleRankSeason ${prevMonth} failed: ${(e as Error).message}`))
       }
     }
     // generate today grid
@@ -110,18 +120,39 @@ export class DailyService implements OnModuleInit {
         entries.push({ userId: parseInt(member, 10), score: parseInt(scoreStr, 10) })
       }
     }
-    // award coins
+    // award coins with a durable per-user/date claim in the same PG transaction
+    let rewardFailed = false
     for (let i = 0; i < entries.length; i++) {
       const rank = i + 1
-      let coins = 0
-      if (rank === 1) coins = 500
-      else if (rank <= 10) coins = 200
-      else coins = 100
-      await this.userRepo
-        .increment({ id: entries[i].userId }, 'coins', coins)
-        .catch((error: unknown) => {
-          this.logger.warn(`daily reward ${entries[i].userId} failed: ${String(error)}`)
+      const coins = rank === 1 ? 500 : rank <= 10 ? 200 : 100
+      const userId = entries[i].userId
+      const alreadyClaimed = await this.rewardClaimRepo.findOne({
+        where: { date: dateStr, userId },
+      })
+      if (alreadyClaimed) continue
+      try {
+        await this.dataSource.transaction(async (manager) => {
+          const existing = await manager.findOne(DailyRewardClaimEntity, {
+            where: { date: dateStr, userId },
+          })
+          if (existing) return
+          await manager.save(
+            manager.create(DailyRewardClaimEntity, {
+              date: dateStr,
+              userId,
+              coins,
+            }),
+          )
+          await manager.increment(UserEntity, { id: userId }, 'coins', coins)
         })
+      } catch (error: unknown) {
+        rewardFailed = true
+        this.logger.warn(`daily reward ${userId} failed: ${String(error)}`)
+      }
+    }
+    if (rewardFailed) {
+      this.logger.warn(`Daily ${dateStr} remains unsettled until all rewards succeed`)
+      return
     }
     // archive snapshots
     for (let i = 0; i < entries.length; i++) {
@@ -303,6 +334,7 @@ export class DailyService implements OnModuleInit {
     await this.updateLeaderboard(`lb:daily:${dayKey}`, userId, result.score)
     await this.updateLeaderboard(`lb:season:${monthKey}`, userId, result.score)
     const allAfter = await this.attemptRepo.find({ where: { date: today, userId } })
+    await this.achievementService.check(userId, 'daily', { count: allAfter.length })
     const myBest = Math.max(...allAfter.map((a) => a.score))
     return {
       saved: true,

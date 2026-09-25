@@ -1,7 +1,7 @@
 import { Controller, Get, Post, Body, Query, Req, UseGuards } from '@nestjs/common'
 import { JwtAuthGuard } from '../auth/jwt.guard'
 import { WordApplyService } from './word-apply.service'
-import type { CellPos } from '../grid-gen/types'
+import { ApplyWordDto } from './word-apply.dto'
 
 @Controller('word-applies')
 @UseGuards(JwtAuthGuard)
@@ -10,7 +10,7 @@ export class WordApplyController {
 
   @Post()
   apply(
-    @Body() body: { word: string; matchSessionId?: string; cells?: CellPos[] },
+    @Body() body: ApplyWordDto,
     @Req() req: { user: { userId: number } },
   ) {
     return this.wordApplyService.apply(

@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Req, UseGuards } from '@nestjs/common'
+import { Controller, Get, Post, Body, Req, Query, UseGuards } from '@nestjs/common'
 import { JwtAuthGuard } from '../auth/jwt.guard'
 import { ItemService } from './item.service'
 
@@ -8,8 +8,14 @@ export class ItemController {
   constructor(private readonly itemService: ItemService) {}
 
   @Get('items')
-  getItems() {
-    return { items: this.itemService.getItems() }
+  getItems(@Query('mode') mode?: string, @Query('bossOnly') bossOnly?: string) {
+    const items = this.itemService.getItems().filter((item) => {
+      if (mode && !item.allowedModes.includes(mode)) return false
+      if (bossOnly === 'true' && !item.bossOnly) return false
+      if (bossOnly === 'false' && item.bossOnly) return false
+      return true
+    })
+    return { items }
   }
 
   @Get('inventory')

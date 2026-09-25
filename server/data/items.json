@@ -1,5 +1,7 @@
 [
   { "id": "hint", "name": "提示", "desc": "高亮一个未找目标词首字", "costType": "coins", "cost": 20, "maxPerLevel": 2, "allowedModes": ["level"], "effect": "hint", "params": {} },
+  { "id": "shuffle", "name": "重排", "desc": "重排当前网格并保留已得分", "costType": "coins", "cost": 30, "maxPerLevel": 1, "allowedModes": ["level", "friend", "pvp_1v1", "pvp_4p"], "effect": "shuffle", "params": {} },
   { "id": "freeze", "name": "冻结", "desc": "暂停计时 10 秒", "costType": "diamonds", "cost": 2, "maxPerLevel": 1, "allowedModes": ["level"], "effect": "freeze", "params": { "seconds": 10 } },
-  { "id": "double", "name": "双倍", "desc": "下一个词得分 ×2", "costType": "coins", "cost": 50, "maxPerLevel": 1, "allowedModes": ["level", "friend", "pvp_1v1", "pvp_4p"], "effect": "double", "params": {} }
+  { "id": "double", "name": "双倍", "desc": "下一个词得分 ×2", "costType": "coins", "cost": 50, "maxPerLevel": 1, "allowedModes": ["level", "friend", "pvp_1v1", "pvp_4p"], "effect": "double", "params": {} },
+  { "id": "peek", "name": "透视", "desc": "显示目标词位置 3 秒", "costType": "diamonds", "cost": 5, "maxPerLevel": 1, "allowedModes": ["level"], "bossOnly": true, "effect": "peek", "params": { "seconds": 3 } }
 ]

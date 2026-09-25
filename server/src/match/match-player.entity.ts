@@ -1,10 +1,11 @@
-import { Entity, PrimaryGeneratedColumn, Column } from 'typeorm'
+import { Entity, PrimaryGeneratedColumn, Column, Index } from 'typeorm'
 
 /**
  * 对局玩家表（GDD §7.4.3 注释：对局玩家分数实时存 Redis，结束后落库）
  * 迭代6详细设计 §3.2
  */
 @Entity('match_players')
+@Index('idx_match_players_match_sid', ['matchId', 'sid'], { unique: true })
 export class MatchPlayerEntity {
   @PrimaryGeneratedColumn()
   id!: number

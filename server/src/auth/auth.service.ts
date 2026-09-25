@@ -9,9 +9,10 @@ import { Repository } from 'typeorm'
 import { JwtService } from '@nestjs/jwt'
 import { UserEntity } from '../user/user.entity'
 import { UserAuthEntity } from '../user/user-auth.entity'
+import { config } from '../common/config'
 
 const MOCK_SMS_CODE = '1234' // mock 验证码（技术债 #7，迭代10接真实短信）
-const JWT_SECRET = 'wordgame-dev-secret-iterate4' // MVP 默认，生产用环境变量
+const JWT_SECRET = config.jwtSecret
 
 @Injectable()
 export class AuthService {

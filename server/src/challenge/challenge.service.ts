@@ -8,6 +8,7 @@ import { GameService } from '../game/game.service'
 import { UserEntity } from '../user/user.entity'
 import { ChallengeEntity } from './challenge.entity'
 import { ChallengeAttemptEntity } from './challenge-attempt.entity'
+import { AchievementService } from '../achievement/achievement.service'
 
 @Injectable()
 export class ChallengeService {
@@ -20,6 +21,7 @@ export class ChallengeService {
     private readonly attemptRepo: Repository<ChallengeAttemptEntity>,
     @InjectRepository(UserEntity)
     private readonly userRepo: Repository<UserEntity>,
+    private readonly achievementService: AchievementService,
   ) {}
 
   async create(userId: number, matchSessionId: string): Promise<{ challengeId: string }> {
@@ -202,6 +204,7 @@ export class ChallengeService {
       ch.bestUserId = userId
     }
     await this.challengeRepo.save(ch)
+    await this.achievementService.check(userId, 'challenge', { count: 1 })
     const rank = await this.getRank(challengeId, result.score)
     return {
       saved: true,

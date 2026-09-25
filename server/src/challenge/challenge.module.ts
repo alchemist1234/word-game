@@ -7,11 +7,13 @@ import { ChallengeController } from './challenge.controller'
 import { GameModule } from '../game/game.module'
 import { AuthModule } from '../auth/auth.module'
 import { UserEntity } from '../user/user.entity'
+import { AchievementModule } from '../achievement/achievement.module'
 
 @Module({
   imports: [
     GameModule,
     AuthModule,
+    AchievementModule,
     TypeOrmModule.forFeature([ChallengeEntity, ChallengeAttemptEntity, UserEntity]),
   ],
   controllers: [ChallengeController],

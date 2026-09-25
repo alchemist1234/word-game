@@ -1,8 +1,9 @@
 import 'reflect-metadata'
-import { DataSource } from 'typeorm'
+import { DataSource, IsNull, Not } from 'typeorm'
 import { dict } from '@node-rs/jieba/dict'
 import { DictionaryEntity } from '../dictionary/dictionary.entity'
 import { config } from '../common/config'
+import extraMeanings from '../../data/dict-extra.json'
 
 /**
  * 词库导入脚本（对齐迭代2详细设计 §7）
@@ -15,6 +16,8 @@ interface RawEntry {
   freq: number
   pos: string
 }
+
+const EXTRA_MEANINGS = extraMeanings as Record<string, string>
 
 function parseDict(): RawEntry[] {
   const text = Buffer.from(dict).toString('utf-8')
@@ -56,6 +59,14 @@ async function main(): Promise<void> {
     selected.push(e)
   }
   console.log(`选中 ${selected.length} 条（成语 ${idioms.length}，普通 ${nonIdioms.length}）`)
+  if (selected.length < 20000) {
+    throw new Error(`词库不足 20000 条：${selected.length}`)
+  }
+  const selectedIdiomCount = selected.filter((e) => e.pos === 'i').length
+  const idiomRatio = selected.length > 0 ? selectedIdiomCount / selected.length : 0
+  if (idiomRatio < 0.35) {
+    throw new Error(`成语占比不足 35%：${(idiomRatio * 100).toFixed(2)}%`)
+  }
 
   // 计算 rarity（对齐 GDD §2.4.2：按词频排名百分位）
   // 非成语词按词频降序：前 30% common / 30-60% normal / 后 40% rare；成语单独 idiom
@@ -77,8 +88,9 @@ async function main(): Promise<void> {
       length: e.word.length,
       frequency: e.freq / maxFreq, // 归一化 0~1（展示用，稀有度由 rarity 决定）
       rarity,
+      tags: e.pos === 'i' ? ['成语'] : [],
       chars: e.word.split(''),
-      meaning: null as string | null,
+      meaning: EXTRA_MEANINGS[e.word] ?? null,
     }
   })
 
@@ -92,18 +104,49 @@ async function main(): Promise<void> {
     password: config.db.password,
     database: config.db.database,
     entities: [DictionaryEntity],
-    synchronize: true,
+    synchronize: false,
   })
   await ds.initialize()
   const repo = ds.getRepository(DictionaryEntity)
 
-  console.log('清空旧数据...')
-  await repo.clear()
+  const replace = process.argv.includes('--replace')
+  if (replace) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('生产环境禁止使用 --replace 清空词库')
+    }
+    console.log('显式替换模式：清空旧数据...')
+    await repo.clear()
+  } else {
+    console.log('增量模式：保留已有词条（仅补齐缺失释义/标签）')
+  }
 
   console.log('批量写入...')
-  // 分批写入（每 500 条）
+  // 使用 INSERT ... ON CONFLICT，脚本中断后可安全重跑。
   for (let i = 0; i < dictWords.length; i += 500) {
-    await repo.save(dictWords.slice(i, i + 500))
+    const batch = dictWords.slice(i, i + 500)
+    const values: string[] = []
+    const params: Array<string | number | null> = []
+    batch.forEach((word, index) => {
+      const base = index * 7
+      values.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}::jsonb, $${base + 6}::jsonb, $${base + 7})`)
+      params.push(
+        word.word,
+        word.length,
+        word.frequency,
+        word.rarity,
+        JSON.stringify(word.tags),
+        JSON.stringify(word.chars),
+        word.meaning,
+      )
+    })
+    await repo.query(
+      `INSERT INTO dictionary (word, length, frequency, rarity, tags, chars, meaning)
+       VALUES ${values.join(', ')}
+       ON CONFLICT (word) DO UPDATE SET
+         meaning = COALESCE(dictionary.meaning, EXCLUDED.meaning),
+         tags = CASE WHEN dictionary.tags = '[]'::jsonb THEN EXCLUDED.tags ELSE dictionary.tags END`,
+      params,
+    )
   }
 
   // 统计
@@ -114,8 +157,15 @@ async function main(): Promise<void> {
     },
     {} as Record<string, number>,
   )
-  console.log(`导入完成：${dictWords.length} 条`)
+  console.log(`导入完成：本次准备 ${dictWords.length} 条`)
   console.log('Rarity 分布:', stats)
+  const total = await repo.count()
+  const idiomCount = await repo.count({ where: { rarity: 'idiom' } })
+  const meaningCount = await repo.count({ where: { meaning: Not(IsNull()) } })
+  console.log(`数据库词库总数：${total}，成语：${idiomCount} (${(idiomCount / Math.max(1, total) * 100).toFixed(2)}%)，释义：${meaningCount}`)
+  if (total < 20000 || idiomCount / Math.max(1, total) < 0.35 || meaningCount / Math.max(1, total) < 0.8) {
+    throw new Error('导入后词库验收未通过')
+  }
 
   await ds.destroy()
 }

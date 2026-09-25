@@ -76,6 +76,7 @@ export interface SubmitWordResponse {
   perfect?: boolean
   perfectBonus?: number
   remainingSec?: number
+  requestId?: string
 }
 
 export interface EndGameResponse {
@@ -218,16 +219,24 @@ export async function queueMatch(opts?: { size?: number; mode?: string }): Promi
 }
 
 /** 轮询匹配状态：queued / matched / timeout（8a：size=4 查询4人队列） */
-export async function matchQueueStatus(size?: number): Promise<MatchQueueResponse> {
-  const qs = size === 4 ? '?size=4' : ''
+export async function matchQueueStatus(size?: number, mode?: string): Promise<MatchQueueResponse> {
+  const query = [
+    size === 4 ? 'size=4' : '',
+    mode ? `mode=${encodeURIComponent(mode)}` : '',
+  ].filter((part) => part.length > 0).join('&')
+  const qs = query ? `?${query}` : ''
   const res = await request(`/match/queue${qs}`)
   if (!res.ok) throw new Error('匹配状态查询失败')
   return res.json()
 }
 
 /** 取消排队 */
-export async function cancelMatchQueue(size?: number): Promise<{ cancelled: boolean }> {
-  const qs = size === 4 ? '?size=4' : ''
+export async function cancelMatchQueue(size?: number, mode?: string): Promise<{ cancelled: boolean }> {
+  const query = [
+    size === 4 ? 'size=4' : '',
+    mode ? `mode=${encodeURIComponent(mode)}` : '',
+  ].filter((part) => part.length > 0).join('&')
+  const qs = query ? `?${query}` : ''
   const res = await request(`/match/queue${qs}`, { method: 'DELETE' })
   if (!res.ok) throw new Error('取消匹配失败')
   return res.json()
@@ -352,6 +361,7 @@ export interface EconomyResponse {
   stamina: number
   maxStamina: number
   nextRecoverAt: string | null
+  staminaNextAt?: string | null
   rankTier: number
   rankScore: number
 }
@@ -370,6 +380,7 @@ export interface WordApplyResponse {
   threshold: number
   status: string
   autoMerged: boolean
+  reviewRequired?: boolean
 }
 export interface MyWordApply {
   word: string
@@ -388,7 +399,9 @@ export async function applyWord(
   })
   if (!res.ok) {
     const data = await res.json().catch(() => null) as { message?: string } | null
-    throw new Error(data?.message || '提交申请失败')
+    const error = new Error(data?.message || '提交申请失败') as Error & { status?: number }
+    error.status = res.status
+    throw error
   }
   return res.json()
 }
@@ -397,7 +410,15 @@ export async function fetchMyWordApplies(): Promise<{ threshold: number; list: M
   if (!res.ok) throw new Error('获取申请列表失败')
   return res.json()
 }
-export async function fetchWordSupporters(word: string): Promise<WordApplyResponse & { word: string; appliedByMe: boolean }> {
+export interface WordSupportersResponse {
+  word: string
+  supporters: number
+  threshold: number
+  inDict: boolean
+  appliedByMe: boolean
+}
+
+export async function fetchWordSupporters(word: string): Promise<WordSupportersResponse> {
   const res = await request(`/word-applies/supporters?word=${encodeURIComponent(word)}`)
   if (!res.ok) throw new Error('获取申请状态失败')
   return res.json()

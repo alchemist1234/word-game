@@ -6,20 +6,23 @@ import {
   ForbiddenException,
   Inject,
 } from '@nestjs/common'
-import { InjectRepository } from '@nestjs/typeorm'
-import { Repository, MoreThanOrEqual } from 'typeorm'
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm'
+import { DataSource, EntityManager, Repository } from 'typeorm'
 import Redis from 'ioredis'
 import { REDIS_TOKEN } from '../common/redis.module'
 import { config } from '../common/config'
+import { cstDateStr } from '../common/time'
 import { WordApplyEntity } from './word-apply.entity'
 import { DictionaryEntity } from '../dictionary/dictionary.entity'
 import { DictionaryService } from '../dictionary/dictionary.service'
 import { validatePath } from '../game/check'
 import type { CellPos } from '../grid-gen/types'
+import sensitiveWords from '../../data/sensitive-words.json'
 
 const WORD_RE = /^[\u4e00-\u9fff]{2,6}$/
 const PENDING = 'pending'
 const AUTO_MERGED = 'auto_merged'
+const BLOCKED_WORDS = new Set((sensitiveWords as string[]).map((word) => word.trim()))
 
 export interface ApplyResult {
   applied: boolean
@@ -29,6 +32,7 @@ export interface ApplyResult {
   threshold: number
   status: string
   autoMerged: boolean
+  reviewRequired?: boolean
 }
 
 @Injectable()
@@ -42,25 +46,67 @@ export class WordApplyService {
     private readonly dictRepo: Repository<DictionaryEntity>,
     private readonly dictionaryService: DictionaryService,
     @Inject(REDIS_TOKEN) private readonly redis: Redis,
+    @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
   private get threshold(): number {
     return config.wordApply.threshold
   }
 
-  /** 申请收录（幂等：一人一票） */
+  private get dailyLimit(): number {
+    return config.wordApply.dailyLimit
+  }
+
+  private get autoMergeEnabled(): boolean {
+    return config.wordApply.autoMergeEnabled
+  }
+
+  private assertSafeWord(word: string): void {
+    if (BLOCKED_WORDS.has(word) || [...BLOCKED_WORDS].some((blocked) => word.includes(blocked))) {
+      throw new BadRequestException('WORD_BLOCKED')
+    }
+  }
+
+  private async reserveDailySlot(userId: number): Promise<string> {
+    const day = cstDateStr().replace(/-/g, '')
+    const key = `word_apply_daily:${userId}:${day}`
+    const count = await this.redis.incr(key)
+    if (count === 1) await this.redis.expire(key, 2 * 24 * 60 * 60)
+    if (count > this.dailyLimit) {
+      await this.redis.decr(key)
+      throw new BadRequestException('DAILY_LIMIT')
+    }
+    return key
+  }
+
+  private async releaseDailySlot(key: string): Promise<void> {
+    try {
+      await this.redis.decr(key)
+    } catch (error) {
+      this.logger.warn(`release word apply daily slot failed: ${(error as Error).message}`)
+    }
+  }
+
+  /** 申请收录（幂等：一人一票；审核能力不足时默认只保留 pending）。 */
   async apply(
     userId: number,
     rawWord: string,
     matchSessionId?: string,
     cells?: CellPos[],
   ): Promise<ApplyResult> {
-    const word = (rawWord ?? '').trim()
+    if (typeof rawWord !== 'string') {
+      throw new BadRequestException('WORD_INVALID')
+    }
+    const word = rawWord.trim()
     if (!WORD_RE.test(word)) {
       throw new BadRequestException('WORD_INVALID')
     }
-    // 已在库：不计数，直接告知
-    if (this.dictionaryService.findByWord(word)) {
+    this.assertSafeWord(word)
+
+    // 已在库：不计数，直接告知。内存缓存未命中时再查一次 PG，兼容多实例刷新延迟。
+    const inMemory = this.dictionaryService.findByWord(word)
+    const inDb = inMemory ? null : await this.dictRepo.findOne({ where: { word } })
+    if (inMemory || inDb) {
       return {
         applied: false,
         inDict: true,
@@ -83,22 +129,46 @@ export class WordApplyService {
       if (session.userId !== userId.toString()) {
         throw new ForbiddenException('会话不属于当前用户')
       }
-      const path = (cells ?? []).map((c) => ({ row: c.row, col: c.col }))
-      if (path.length < 2 || !path.every((c) => Number.isInteger(c.row) && Number.isInteger(c.col))) {
+      if (cells !== undefined && !Array.isArray(cells)) {
         throw new BadRequestException('EVIDENCE_INVALID')
       }
-      if (!validatePath(path).valid) {
+      const path = (cells ?? []).map((cell) => {
+        if (!cell || typeof cell !== 'object') {
+          throw new BadRequestException('EVIDENCE_INVALID')
+        }
+        const value = cell as { row?: unknown; col?: unknown }
+        if (!Number.isInteger(value.row) || !Number.isInteger(value.col)) {
+          throw new BadRequestException('EVIDENCE_INVALID')
+        }
+        return { row: value.row as number, col: value.col as number }
+      })
+      if (path.length < 2) {
         throw new BadRequestException('EVIDENCE_INVALID')
       }
       let grid: string[][] = []
       try {
-        grid = JSON.parse(session.grid) as string[][]
+        const parsed: unknown = JSON.parse(session.grid)
+        if (
+          !Array.isArray(parsed) ||
+          parsed.length === 0 ||
+          parsed.some(
+            (row) =>
+              !Array.isArray(row) ||
+              row.length !== parsed.length ||
+              row.some((cell) => typeof cell !== 'string'),
+          )
+        ) {
+          throw new Error('invalid grid')
+        }
+        grid = parsed as string[][]
       } catch {
         throw new BadRequestException('EVIDENCE_INVALID')
       }
-      const gridChars = path
-        .map((c) => grid[c.row]?.[c.col] ?? '')
-        .join('')
+      const pathResult = validatePath(path, grid.length)
+      if (!pathResult.valid) {
+        throw new BadRequestException('EVIDENCE_INVALID')
+      }
+      const gridChars = path.map((c) => grid[c.row]?.[c.col] ?? '').join('')
       if (gridChars !== word) {
         throw new BadRequestException('EVIDENCE_INVALID')
       }
@@ -107,62 +177,86 @@ export class WordApplyService {
       cellsJson = path
     }
 
-    // 单用户每日上限
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
-    const todayCount = await this.applyRepo.count({
-      where: { userId, createdAt: MoreThanOrEqual(today) },
-    })
-    if (todayCount >= config.wordApply.dailyLimit) {
-      throw new BadRequestException('DAILY_LIMIT')
-    }
+    // Redis 原子日限，避免多实例并发绕过 users/word_applies 的 count 检查。
+    const dailyKey = await this.reserveDailySlot(userId)
+    try {
+      let merged = false
+      const result: ApplyResult = await this.dataSource.transaction(async (manager) => {
+        const repo = manager.getRepository(WordApplyEntity)
+        const existing = await repo.findOne({ where: { word, userId } })
+        if (existing) {
+          existing.updatedAt = new Date()
+          await repo.save(existing)
+          const supporters = await this.countSupporters(word, repo)
+          if (this.autoMergeEnabled && supporters >= this.threshold && existing.status === PENDING) {
+            await this.tryAutoMergeWithManager(manager, word)
+            merged = true
+            return {
+              applied: false,
+              alreadyApplied: true,
+              supporters,
+              threshold: this.threshold,
+              status: AUTO_MERGED,
+              autoMerged: true,
+              reviewRequired: false,
+            }
+          }
+          return {
+            applied: false,
+            alreadyApplied: true,
+            supporters,
+            threshold: this.threshold,
+            status: existing.status,
+            autoMerged: false,
+            reviewRequired: existing.status === PENDING,
+          }
+        }
 
-    // 幂等：一人一票，重复提交只刷新时间
-    const existing = await this.applyRepo.findOne({ where: { word, userId } })
-    if (existing) {
-      existing.updatedAt = new Date()
-      await this.applyRepo.save(existing).catch((e: Error) => {
-        this.logger.warn(`touch apply failed: ${e.message}`)
+        const entity = repo.create({
+          word,
+          userId,
+          status: PENDING,
+          source,
+          matchSessionId: matchSessionId ?? null,
+          cells: cellsJson,
+          gridSeed,
+        })
+        await repo.save(entity)
+        const supporters = await this.countSupporters(word, repo)
+        if (this.autoMergeEnabled && supporters >= this.threshold) {
+          await this.tryAutoMergeWithManager(manager, word)
+          merged = true
+          return {
+            applied: true,
+            supporters,
+            threshold: this.threshold,
+            status: AUTO_MERGED,
+            autoMerged: true,
+            reviewRequired: false,
+          }
+        }
+        return {
+          applied: true,
+          supporters,
+          threshold: this.threshold,
+          status: PENDING,
+          autoMerged: false,
+          reviewRequired: true,
+        }
       })
-      const supporters = await this.countSupporters(word)
-      return {
-        applied: false,
-        alreadyApplied: true,
-        supporters,
-        threshold: this.threshold,
-        status: existing.status,
-        autoMerged: false,
-      }
-    }
 
-    const entity = this.applyRepo.create({
-      word,
-      userId,
-      status: PENDING,
-      source,
-      matchSessionId: matchSessionId ?? null,
-      cells: cellsJson,
-      gridSeed,
-    })
-    await this.applyRepo.save(entity)
-
-    const supporters = await this.countSupporters(word)
-    if (supporters >= this.threshold) {
-      await this.tryAutoMerge(word)
-      return {
-        applied: true,
-        supporters,
-        threshold: this.threshold,
-        status: AUTO_MERGED,
-        autoMerged: true,
+      if (merged) {
+        try {
+          await this.dictionaryService.refresh()
+        } catch (error) {
+          // DB 已提交；缓存刷新失败由新会话/重启恢复，不回滚已成功的申请事务。
+          this.logger.error(`dictionary refresh after auto merge failed: ${(error as Error).message}`)
+        }
       }
-    }
-    return {
-      applied: true,
-      supporters,
-      threshold: this.threshold,
-      status: PENDING,
-      autoMerged: false,
+      return result
+    } catch (error) {
+      await this.releaseDailySlot(dailyKey)
+      throw error
     }
   }
 
@@ -203,11 +297,16 @@ export class WordApplyService {
     inDict: boolean
     appliedByMe: boolean
   }> {
-    const w = (word ?? '').trim()
+    if (typeof word !== 'string') {
+      throw new BadRequestException('WORD_INVALID')
+    }
+    const w = word.trim()
     if (!WORD_RE.test(w)) {
       throw new BadRequestException('WORD_INVALID')
     }
-    const inDict = !!this.dictionaryService.findByWord(w)
+    const inMemory = this.dictionaryService.findByWord(w)
+    const inDb = inMemory ? null : await this.dictRepo.findOne({ where: { word: w } })
+    const inDict = !!inMemory || !!inDb
     const supporters = await this.countSupporters(w)
     const mine = await this.applyRepo.findOne({ where: { word: w, userId } })
     return {
@@ -219,8 +318,11 @@ export class WordApplyService {
     }
   }
 
-  private async countSupporters(word: string): Promise<number> {
-    return this.applyRepo.count({ where: { word, status: PENDING } })
+  private async countSupporters(
+    word: string,
+    repo: Repository<WordApplyEntity> = this.applyRepo,
+  ): Promise<number> {
+    return repo.count({ where: { word, status: PENDING } })
   }
 
   private async supportersMap(words: string[]): Promise<Map<string, number>> {
@@ -239,33 +341,21 @@ export class WordApplyService {
     return map
   }
 
-  /** 达阈值自动入库（主键去重防并发重复） */
-  private async tryAutoMerge(word: string): Promise<void> {
-    const exists = await this.dictRepo.findOne({ where: { word } })
-    if (!exists) {
-      try {
-        await this.dictRepo.save(
-          this.dictRepo.create({
-            word,
-            length: word.length,
-            frequency: 0.02,
-            rarity: 'normal',
-            tags: ['player-suggest'],
-            chars: word.split(''),
-            meaning: null,
-          }),
-        )
-      } catch (e) {
-        // 并发重复插入：主键冲突则视为已入库，继续置状态
-        const again = await this.dictRepo.findOne({ where: { word } })
-        if (!again) {
-          this.logger.warn(`auto merge save failed: ${(e as Error).message}`)
-          throw e
-        }
-      }
-    }
-    await this.applyRepo.update({ word }, { status: AUTO_MERGED })
-    await this.dictionaryService.refresh()
-    this.logger.log(`word auto merged: ${word}`)
+  /** 在同一事务内以 ON CONFLICT 幂等写入 dictionary，并更新申请状态。 */
+  private async tryAutoMergeWithManager(manager: EntityManager, word: string): Promise<void> {
+    await manager.query(
+      `INSERT INTO dictionary (word, length, frequency, rarity, tags, chars, meaning)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, NULL)
+       ON CONFLICT (word) DO NOTHING`,
+      [
+        word,
+        word.length,
+        0.02,
+        'normal',
+        JSON.stringify(['player-suggest']),
+        JSON.stringify(word.split('')),
+      ],
+    )
+    await manager.update(WordApplyEntity, { word }, { status: AUTO_MERGED })
   }
 }
